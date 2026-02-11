@@ -1,0 +1,20 @@
+{
+    "userAddress": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "vc": {
+        "@context": [
+            "https://www.w3.org/2018/credentials/v1"
+        ],
+        "type": [
+            "VerifiableCredential",
+            "StudentCredential"
+        ],
+        "issuer": "did:web:university.edu",
+        "issuanceDate": "2026-02-05T06:09:41.825Z",
+        "credentialSubject": {
+            "id": "did:ethr:0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "studentId": "12345001",
+            "status": "active"
+        }
+    },
+    "signature": "mock-signature-of-vc-by-university"
+}
