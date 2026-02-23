@@ -2,12 +2,20 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const { authMiddleware, adminMiddleware } = require('../middleware/authMiddleware');
+
+// Ensure uploads directory exists (Railway ephemeral filesystem resets on redeploy)
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    console.log('📁 Created uploads directory');
+}
 
 // Configure storage
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, 'uploads/');
+        cb(null, uploadsDir);
     },
     filename: (req, file, cb) => {
         // Unique filename: timestamp + random number + extension
@@ -40,10 +48,9 @@ router.post('/', authMiddleware, adminMiddleware, upload.single('image'), (req, 
             return res.status(400).json({ success: false, error: 'Please upload a file' });
         }
 
-        // Construct URL
-        const protocol = req.protocol;
-        const host = req.get('host');
-        const fileUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+        // Construct URL using BACKEND_URL env var for production reliability
+        const baseUrl = process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
+        const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
 
         res.json({
             success: true,
