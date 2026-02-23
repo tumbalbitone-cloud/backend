@@ -5,10 +5,18 @@ const path = require("path");
 
 let io;
 
+// Same whitelist as server.js - CORS_ORIGINS or FRONTEND_URL
+const getCorsOrigins = () => {
+    if (process.env.CORS_ORIGINS) {
+        return process.env.CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    return [process.env.FRONTEND_URL || "http://localhost:3000"];
+};
+
 const initializeSocket = (server) => {
     io = new Server(server, {
         cors: {
-            origin: process.env.FRONTEND_URL || "http://localhost:3000",
+            origin: getCorsOrigins(),
             methods: ["GET", "POST", "OPTIONS"],
             credentials: true
         }

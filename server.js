@@ -18,11 +18,20 @@ const { initializeSocket } = require('./utils/socketHandler'); // Import socket 
 connectDB();
 
 // Middleware
-// CORS configuration - allow requests from frontend
-// Must be before other middleware
-// CORS middleware automatically handles OPTIONS preflight requests
+// CORS configuration - whitelist allowed origins
+// CORS_ORIGINS = comma-separated list, e.g. "https://app.com,https://admin.app.com"
+// FRONTEND_URL = single origin (fallback if CORS_ORIGINS not set)
+const corsWhitelist = process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+    : [process.env.FRONTEND_URL || 'http://localhost:3000'];
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: (origin, callback) => {
+        if (!origin || corsWhitelist.includes(origin)) {
+            callback(null, origin || corsWhitelist[0]);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
@@ -88,7 +97,7 @@ const io = initializeSocket(server);
 server.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`CORS enabled for: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+    console.log(`CORS whitelist: ${corsWhitelist.join(', ')}`);
     console.log(`Health check: http://localhost:${PORT}/`);
     console.log(`Socket.IO initialized`);
 }).on('error', (err) => {
