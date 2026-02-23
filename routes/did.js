@@ -142,8 +142,8 @@ router.get('/status/:address', authMiddleware, [
 
             try {
                 // Check NFT balance
-                const VotingSystemArtifact = require('../../frontend/src/contracts/VotingSystem.json');
-                const provider = new ethers.JsonRpcProvider("http://127.0.0.1:8545");
+                const VotingSystemArtifact = require('../contracts/VotingSystem.json');
+                const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545");
                 const nftContract = new ethers.Contract(process.env.VOTING_SYSTEM_ADDRESS, VotingSystemArtifact.abi, provider);
 
                 // Get balance strictly for this address
@@ -247,9 +247,9 @@ router.post('/verify-and-register',
             const studentId = vc.credentialSubject.studentId;
 
             // Call Blockchain to Register Voter (NOW ONLY MINT NFT)
-            const VotingSystemArtifact = require('../../frontend/src/contracts/VotingSystem.json');
+            const VotingSystemArtifact = require('../contracts/VotingSystem.json');
 
-            const provider = new ethers.JsonRpcProvider("http://127.0.0.1:8545");
+            const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545");
             // Use Admin Wallet (Owner)
             const privateKey = process.env.ADMIN_PRIVATE_KEY || "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
             const wallet = new ethers.Wallet(privateKey, provider);
