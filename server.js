@@ -21,12 +21,38 @@ connectDB();
 // CORS configuration - whitelist allowed origins
 // CORS_ORIGINS = comma-separated list, e.g. "https://app.com,https://admin.app.com"
 // FRONTEND_URL = single origin (fallback if CORS_ORIGINS not set)
-const corsWhitelist = process.env.CORS_ORIGINS
+const baseWhitelist = process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
     : [process.env.FRONTEND_URL || 'http://localhost:3000'];
+
+// Tambah origin backend untuk Swagger UI (Try it out) - request dari /api-docs
+const corsWhitelist = [
+    ...baseWhitelist,
+    `http://localhost:${PORT}`,
+    `http://127.0.0.1:${PORT}`
+];
+
+// Development: allow localhost, 127.0.0.1, dan private network (192.168.x.x, 10.x.x.x) di port manapun
+const isDev = process.env.NODE_ENV !== 'production';
+const isAllowedOrigin = (origin) => {
+    if (!origin) return true;
+    if (corsWhitelist.includes(origin)) return true;
+    if (isDev) {
+        try {
+            const u = new URL(origin);
+            const hostname = u.hostname;
+            if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
+            const parts = hostname.split('.').map(Number);
+            if (parts[0] === 192 && parts[1] === 168) return true; // 192.168.x.x
+            if (parts[0] === 10) return true; // 10.x.x.x
+        } catch (_) { /* invalid URL */ }
+    }
+    return false;
+};
+
 app.use(cors({
     origin: (origin, callback) => {
-        if (!origin || corsWhitelist.includes(origin)) {
+        if (isAllowedOrigin(origin)) {
             callback(null, origin || corsWhitelist[0]);
         } else {
             callback(new Error('Not allowed by CORS'));
@@ -64,17 +90,26 @@ app.get('/', (req, res) => {
     });
 });
 
+// API Documentation (Swagger UI) - http://localhost:3001/api-docs
+const swaggerUi = require('swagger-ui-express');
+const swaggerDocument = require('./config/swagger');
+app.get('/api-docs.json', (req, res) => res.json(swaggerDocument));
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(null, {
+    swaggerOptions: {
+        url: '/api-docs.json',
+        validatorUrl: null
+    },
+    explorer: true
+}));
+
 // Import routes
 const authRoutes = require('./routes/auth');
-const votingRoutes = require('./routes/voting');
 const didRoutes = require('./routes/did');
 const userRoutes = require('./routes/users');
 const uploadRoutes = require('./routes/uploadRoutes');
 
-// Routes (admin-only endpoints are protected with adminMiddleware in their routers)
-// - POST /api/users/create, POST /api/upload, GET /api/voting/audit/:sessionId → auth + admin
+// Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/voting', votingRoutes);
 app.use('/api/did', didRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/upload', uploadRoutes);
@@ -99,6 +134,7 @@ server.listen(PORT, () => {
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`CORS whitelist: ${corsWhitelist.join(', ')}`);
     console.log(`Health check: http://localhost:${PORT}/`);
+    console.log(`API Docs (Swagger): http://localhost:${PORT}/api-docs`);
     console.log(`Socket.IO initialized`);
 }).on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
