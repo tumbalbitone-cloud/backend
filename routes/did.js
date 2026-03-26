@@ -14,6 +14,18 @@ const {
     createDidFromAddress
 } = require('../utils/vc');
 
+// Helper to prevent hanging Promises
+const withTimeout = (promise, ms, message) => {
+    let timer;
+    const timeoutPromise = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message || 'Operation timed out')), ms);
+    });
+    return Promise.race([
+        promise,
+        timeoutPromise
+    ]).finally(() => clearTimeout(timer));
+};
+
 /**
  * @route   POST /api/did/bind
  * @desc    Bind wallet to student ID and issue VC
@@ -303,7 +315,7 @@ router.post('/verify-and-register',
             // 1. Mint NFT
             // Check if already has NFT to avoid waste/error (Optional but recommended)
             try {
-                const balance = await nftContract.balanceOf(userAddress);
+                const balance = await withTimeout(nftContract.balanceOf(userAddress), 10000, "balanceOf timeout");
                 if (balance > 0) {
                     console.log(`User ${userAddress} already has NFT. Skipping mint.`);
                     return res.json({
@@ -320,11 +332,11 @@ router.post('/verify-and-register',
             console.log(`Minting StudentNFT for ${userAddress} with ID ${studentId}...`);
 
             // Force refresh nonce to avoid "Nonce too low" issues
-            const nonce = await wallet.getNonce();
+            const nonce = await withTimeout(wallet.getNonce(), 10000, "getNonce timeout");
 
             let nftTxHash = null;
             try {
-                const txNft = await nftContract.mint(userAddress, studentId, { nonce });
+                const txNft = await withTimeout(nftContract.mint(userAddress, studentId, { nonce }), 15000, "mint timeout");
                 console.log("Minting tx sent:", txNft.hash);
                 nftTxHash = txNft.hash;
 
