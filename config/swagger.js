@@ -116,6 +116,72 @@ Format header: \`Authorization: Bearer <token>\`
                         name: { type: 'string', minLength: 2, maxLength: 100 },
                         password: { type: 'string', minLength: 6 }
                     }
+                },
+                BulkImportResponse: {
+                    type: 'object',
+                    properties: {
+                        success: { type: 'boolean' },
+                        message: { type: 'string' },
+                        summary: {
+                            type: 'object',
+                            properties: {
+                                totalRows: { type: 'integer' },
+                                created: { type: 'integer' },
+                                failed: { type: 'integer' },
+                                defaultPassword: { type: 'string' }
+                            }
+                        },
+                        failed: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    line: { type: 'integer' },
+                                    studentId: { type: 'string' },
+                                    reason: { type: 'string' }
+                                }
+                            }
+                        }
+                    }
+                },
+                ResolveVoterAddressesRequest: {
+                    type: 'object',
+                    required: ['studentIds'],
+                    properties: {
+                        studentIds: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description: 'Array of student IDs (NIM)'
+                        }
+                    }
+                },
+                ResolveVoterAddressesResponse: {
+                    type: 'object',
+                    properties: {
+                        success: { type: 'boolean' },
+                        resolved: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    studentId: { type: 'string' },
+                                    name: { type: 'string' },
+                                    address: { type: 'string' }
+                                }
+                            }
+                        },
+                        unresolved: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    studentId: { type: 'string' },
+                                    name: { type: 'string' },
+                                    reason: { type: 'string' }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -270,6 +336,7 @@ Format header: \`Authorization: Bearer <token>\`
                                             claimed: { type: 'boolean' },
                                             studentId: { type: 'string' },
                                             nftClaimed: { type: 'boolean' },
+                                            txHash: { type: 'string' },
                                             vc: { type: 'object' },
                                             vcJwt: { type: 'string' }
                                         }
@@ -304,6 +371,7 @@ Format header: \`Authorization: Bearer <token>\`
                                         properties: {
                                             success: { type: 'boolean' },
                                             message: { type: 'string' },
+                                            txHash: { type: 'string' },
                                             nftTxHash: { type: 'string' }
                                         }
                                     }
@@ -354,6 +422,120 @@ Format header: \`Authorization: Bearer <token>\`
                             }
                         },
                         400: { description: 'User sudah ada / validasi gagal' }
+                    }
+                }
+            },
+            '/api/users/list': {
+                get: {
+                    tags: ['Users'],
+                    summary: 'List users',
+                    description: 'Dapatkan daftar seluruh mahasiswa dengan fitur limit dan search query. Hanya **Admin**.',
+                    security: [{ bearerAuth: [] }],
+                    parameters: [
+                        {
+                            name: 'q',
+                            in: 'query',
+                            description: 'Pencarian berdasarkan NIM atau Nama. Opsional.',
+                            required: false,
+                            schema: { type: 'string' }
+                        },
+                        {
+                            name: 'limit',
+                            in: 'query',
+                            description: 'Batas jumlah data. Maks 1000. Opsional.',
+                            required: false,
+                            schema: { type: 'integer' }
+                        }
+                    ],
+                    responses: {
+                        200: {
+                            description: 'Daftar mahasiswa berhasil didapatkan',
+                            content: {
+                                'application/json': {
+                                    schema: {
+                                        type: 'object',
+                                        properties: {
+                                            success: { type: 'boolean' },
+                                            students: {
+                                                type: 'array',
+                                                items: {
+                                                    type: 'object',
+                                                    properties: {
+                                                        studentId: { type: 'string' },
+                                                        name: { type: 'string' },
+                                                        active: { type: 'boolean' },
+                                                        claimedBy: { type: 'string', nullable: true }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            '/api/users/bulk-import': {
+                post: {
+                    tags: ['Users'],
+                    summary: 'Bulk import user (CSV/Excel)',
+                    description: 'Impor akun pemilih massal melalui file CSV, XLS, atau XLSX. Hanya **Admin**.',
+                    security: [{ bearerAuth: [] }],
+                    requestBody: {
+                        required: true,
+                        content: {
+                            'multipart/form-data': {
+                                schema: {
+                                    type: 'object',
+                                    properties: {
+                                        file: {
+                                            type: 'string',
+                                            format: 'binary',
+                                            description: 'File spreadsheet (maks 5MB)'
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    responses: {
+                        200: {
+                            description: 'Import selesai',
+                            content: {
+                                'application/json': {
+                                    schema: { $ref: '#/components/schemas/BulkImportResponse' }
+                                }
+                            }
+                        },
+                        400: { description: 'Format file tidak didukung / error validasi file' }
+                    }
+                }
+            },
+            '/api/users/resolve-voter-addresses': {
+                post: {
+                    tags: ['Users'],
+                    summary: 'Resolve NIM ke Alamat Dompet',
+                    description: 'Memetakan ID mahasiswa (NIM) dengan alamat wallet MetaMask yang terdaftar dan memeriksa status kelayakan. Digunakan untuk draft allowlist sesi pemilihan. Hanya **Admin**.',
+                    security: [{ bearerAuth: [] }],
+                    requestBody: {
+                        required: true,
+                        content: {
+                            'application/json': {
+                                schema: { $ref: '#/components/schemas/ResolveVoterAddressesRequest' }
+                            }
+                        }
+                    },
+                    responses: {
+                        200: {
+                            description: 'Pemetaan alamat berhasil diselesaikan (sebagian / seluruhnya)',
+                            content: {
+                                'application/json': {
+                                    schema: { $ref: '#/components/schemas/ResolveVoterAddressesResponse' }
+                                }
+                            }
+                        },
+                        400: { description: 'Payload tidak valid' }
                     }
                 }
             },

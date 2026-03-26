@@ -7,6 +7,7 @@ const Admin = require('../models/Admin');
 const { generateToken, generateRefreshToken } = require('../utils/jwt');
 const { AppError } = require('../middleware/errorHandler');
 const { authLimiter } = require('../middleware/rateLimiter');
+const { authMiddleware } = require('../middleware/authMiddleware');
 require('dotenv').config();
 
 /**
@@ -152,6 +153,70 @@ router.post('/refresh', [
         if (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError') {
             return next(new AppError('Invalid or expired refresh token', 401));
         }
+        next(err);
+    }
+});
+
+/**
+ * @route   PUT /api/auth/change-password
+ * @desc    Change user's password
+ * @access  Private
+ */
+router.put('/change-password', authMiddleware, [
+    body('currentPassword')
+        .notEmpty()
+        .withMessage('Current password is required'),
+    body('newPassword')
+        .notEmpty()
+        .withMessage('New password is required')
+        .isLength({ min: 6 })
+        .withMessage('New password must be at least 6 characters')
+], async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                success: false,
+                error: 'Validation failed',
+                details: errors.array()
+            });
+        }
+
+        const { currentPassword, newPassword } = req.body;
+        const userId = req.user.id;
+        const userRole = req.user.role;
+
+        let user;
+        if (userRole === 'admin') {
+            user = await Admin.findById(userId);
+        } else if (userRole === 'user') {
+            user = await Student.findById(userId);
+        }
+
+        if (!user) {
+            throw new AppError('User not found', 404);
+        }
+
+        // Verify current password
+        const isMatch = await bcrypt.compare(currentPassword, user.password);
+        if (!isMatch) {
+            throw new AppError('Password saat ini salah', 401);
+        }
+
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        // Update password
+        user.password = hashedPassword;
+        await user.save();
+
+        res.json({
+            success: true,
+            message: 'Password berhasil diperbarui'
+        });
+
+    } catch (err) {
         next(err);
     }
 });

@@ -14,6 +14,29 @@ const { errorHandler } = require('./middleware/errorHandler');
 const { apiLimiter } = require('./middleware/rateLimiter');
 const { initializeSocket } = require('./utils/socketHandler'); // Import socket handler
 
+// Fail-fast in production if critical secrets are missing
+const requireEnv = (key) => {
+    const v = process.env[key];
+    if (!v || String(v).trim() === '') {
+        throw new Error(`Missing required environment variable: ${key}`);
+    }
+    return v;
+};
+
+if (process.env.NODE_ENV === 'production') {
+    try {
+        requireEnv('JWT_SECRET');
+        requireEnv('JWT_REFRESH_SECRET');
+        requireEnv('ADMIN_PRIVATE_KEY');
+        requireEnv('VC_ISSUER_PRIVATE_KEY');
+        requireEnv('VOTING_SYSTEM_ADDRESS');
+        requireEnv('BLOCKCHAIN_RPC_URL');
+    } catch (e) {
+        console.error('❌ Production env validation failed:', e.message);
+        process.exit(1);
+    }
+}
+
 // Connect to Database
 connectDB();
 

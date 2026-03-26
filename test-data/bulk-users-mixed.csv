@@ -1,0 +1,11 @@
+studentId,name,password
+230001,Kevin Maulana,kevin12345
+230002,Lia Amelia,lia12345
+23,Invalid NIM Too Short,pass123
+230004,M,pass12345
+230005,Nina Oktavia,123
+230002,Duplicate NIM in File,dup12345
+,Missing NIM,missing123
+230007,,noname123
+230008,Rio Saputra,riosaputra
+230009,Salsa Putri,salsa12345

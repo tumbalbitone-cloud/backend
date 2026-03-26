@@ -55,28 +55,42 @@ router.post('/bind', didLimiter, authMiddleware, userMiddleware, [
         // Force lowercase for address to prevent multiple bindings with different casing
         userAddress = ethers.getAddress(userAddress); // Normalize address
 
-        // Check if student exists
-        const student = await Student.findOne({ studentId });
-        if (!student || !student.active) {
-            throw new AppError('Student not found or inactive', 404);
-        }
+        const normalizedAddress = userAddress.toLowerCase();
 
-        // Check if ID is already claimed
-        if (student.claimedBy && student.claimedBy.toLowerCase() !== userAddress.toLowerCase()) {
-            throw new AppError('Student ID already bound to another wallet', 400);
-        }
+        // Atomic bind:
+        // - only active student can be bound
+        // - allow idempotent bind to same wallet
+        // - forbid replacing with another wallet
+        const student = await Student.findOneAndUpdate(
+            {
+                studentId,
+                active: true,
+                $or: [
+                    { claimedBy: null },
+                    { claimedByNormalized: normalizedAddress }
+                ]
+            },
+            {
+                $set: {
+                    claimedBy: userAddress,
+                    claimedByNormalized: normalizedAddress
+                }
+            },
+            { new: true }
+        );
 
-        // Check if Address already claimed ANY ID
-        const existingClaim = await Student.findOne({
-            claimedBy: { $regex: new RegExp(`^${userAddress}$`, 'i') }
-        });
-        if (existingClaim && existingClaim.studentId !== studentId) {
-            throw new AppError(`Wallet already bound to Student ID: ${existingClaim.studentId}`, 400);
-        }
+        if (!student) {
+            const existing = await Student.findOne({ studentId }, 'active claimedBy');
+            if (!existing || !existing.active) {
+                throw new AppError('Student not found or inactive', 404);
+            }
 
-        // Lock the claim
-        student.claimedBy = userAddress;
-        await student.save();
+            if (existing.claimedBy && existing.claimedBy.toLowerCase() !== normalizedAddress) {
+                throw new AppError('Student ID already bound to another wallet', 400);
+            }
+
+            throw new AppError('Failed to bind wallet', 400);
+        }
 
         // Create Verifiable Credential according to W3C standard
         const credentialSubject = {
@@ -98,6 +112,9 @@ router.post('/bind', didLimiter, authMiddleware, userMiddleware, [
             message: "Wallet bound successfully"
         });
     } catch (err) {
+        if (err?.code === 11000) {
+            return next(new AppError('Wallet already bound to another student ID', 400));
+        }
         next(err);
     }
 });
@@ -127,7 +144,10 @@ router.get('/status/:address', authMiddleware, [
 
         const normalizedAddress = ethers.getAddress(address);
         const student = await Student.findOne({
-            claimedBy: { $regex: new RegExp(`^${normalizedAddress}$`, 'i') }
+            $or: [
+                { claimedByNormalized: normalizedAddress.toLowerCase() },
+                { claimedBy: { $regex: new RegExp(`^${normalizedAddress}$`, 'i') } }
+            ]
         });
 
         // Non-admin users may only check status for an address bound to their own studentId (or unbound)
@@ -173,6 +193,7 @@ router.get('/status/:address', authMiddleware, [
                 claimed: true,
                 studentId: student.studentId,
                 nftClaimed: nftClaimed,
+                txHash: student.nftTxHash || null,
                 vc: vc,
                 vcJwt: vcJwt
             });
@@ -222,13 +243,15 @@ router.post('/verify-and-register',
                 });
             }
 
-            const { userAddress, vcJwt } = req.body;
+            let { userAddress, vcJwt } = req.body;
+            // Normalize address early (consistent checks + contract calls)
+            userAddress = ethers.getAddress(userAddress);
 
             // Verify VC JWT
             const verificationResult = await verifyVerifiableCredential(vcJwt);
 
             if (!verificationResult.valid) {
-                throw new AppError(`Invalid VC: ${verificationResult.error}`, 401);
+                throw new AppError(`Invalid VC: ${verificationResult.error}`, 400);
             }
 
             const vc = verificationResult.vc;
@@ -246,12 +269,32 @@ router.post('/verify-and-register',
 
             const studentId = vc.credentialSubject.studentId;
 
+            // Load student record (used for txHash persistence/response)
+            const student = await Student.findOne({ studentId });
+            if (!student || !student.active) {
+                throw new AppError('Student not found or inactive', 404);
+            }
+
+            if (!student.claimedBy) {
+                throw new AppError('Wallet is not bound to this student ID', 400);
+            }
+
+            const boundAddress = (student.claimedByNormalized || String(student.claimedBy || '').toLowerCase());
+            if (boundAddress !== userAddress.toLowerCase()) {
+                throw new AppError('Wallet does not match bound student account', 403);
+            }
+
             // Call Blockchain to Register Voter (NOW ONLY MINT NFT)
             const VotingSystemArtifact = require('../contracts/VotingSystem.json');
 
             const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545");
             // Use Admin Wallet (Owner)
-            const privateKey = process.env.ADMIN_PRIVATE_KEY || "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+            const isProd = process.env.NODE_ENV === 'production';
+            const privateKey = process.env.ADMIN_PRIVATE_KEY
+                || (!isProd ? "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" : null);
+            if (!privateKey) {
+                throw new AppError('ADMIN_PRIVATE_KEY is required in production', 500);
+            }
             const wallet = new ethers.Wallet(privateKey, provider);
 
             // We only need NFT contract now (VotingSystem handles NFT)
@@ -266,8 +309,8 @@ router.post('/verify-and-register',
                     return res.json({
                         success: true,
                         message: "Already Registered (NFT Owned)",
-                        txHash: null,
-                        nftTxHash: null // Already has it
+                        txHash: student?.nftTxHash || null,
+                        nftTxHash: student?.nftTxHash || null // Already has it
                     });
                 }
             } catch (e) {
@@ -285,6 +328,13 @@ router.post('/verify-and-register',
                 console.log("Minting tx sent:", txNft.hash);
                 await txNft.wait();
                 nftTxHash = txNft.hash;
+
+                // Save txHash to database
+                if (student) {
+                    student.nftTxHash = nftTxHash;
+                    await student.save();
+                }
+
                 console.log(`[ON-CHAIN] Minted NFT for: ${userAddress}`);
             } catch (err) {
                 console.error("Minting failed:", err);

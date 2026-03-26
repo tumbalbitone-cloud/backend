@@ -27,8 +27,13 @@ const errorHandler = (err, req, res, next) => {
 
     // Mongoose duplicate key
     if (err.code === 11000) {
-        const field = Object.keys(err.keyPattern)[0];
-        const message = `${field} already exists`;
+        const keyPattern = err.keyPattern || {};
+        const keyValue = err.keyValue || {};
+        const field = Object.keys(keyPattern)[0] || Object.keys(keyValue)[0] || 'field';
+        const value = keyValue[field];
+        const message = value !== undefined
+            ? `${field} already exists (${value})`
+            : `${field} already exists`;
         error = new AppError(message, 400);
     }
 

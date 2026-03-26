@@ -21,6 +21,18 @@ const StudentSchema = new mongoose.Schema({
     claimedBy: {
         type: String, // Stores the Ethereum address of the user who claimed this ID
         default: null
+    },
+    claimedByNormalized: {
+        type: String,
+        default: undefined,
+        index: {
+            unique: true,
+            sparse: true
+        }
+    },
+    nftTxHash: {
+        type: String, // Stores the transaction hash when the NFT was minted
+        default: null
     }
 });
 
