@@ -4,6 +4,8 @@ const http = require('http');
 require('dotenv').config();
 
 const path = require('path');
+const fs = require('fs');
+const { verifyUploadQuery } = require('./utils/uploadSign');
 
 const app = express();
 const server = http.createServer(app);
@@ -32,7 +34,34 @@ app.use(cors(expressCorsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+const uploadsDir = path.join(__dirname, 'uploads');
+app.get('/uploads/:filename', (req, res) => {
+    const filename = req.params.filename;
+    if (!filename || filename.includes('..') || /[/\\]/.test(filename)) {
+        return res.status(400).json({ success: false, error: 'Invalid filename' });
+    }
+    const filePath = path.join(uploadsDir, filename);
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(uploadsDir))) {
+        return res.status(400).json({ success: false, error: 'Invalid filename' });
+    }
+
+    const allowLegacy =
+        process.env.NODE_ENV !== 'production' || process.env.UPLOAD_ALLOW_UNSIGNED === 'true';
+
+    const { sig, exp } = req.query;
+    const okSig = verifyUploadQuery(filename, sig, exp);
+
+    if (!okSig && !allowLegacy) {
+        return res.status(403).json({ success: false, error: 'Tautan tidak valid atau kedaluwarsa' });
+    }
+
+    if (!fs.existsSync(resolved)) {
+        return res.status(404).json({ success: false, error: 'Berkas tidak ditemukan' });
+    }
+
+    res.sendFile(resolved);
+});
 
 app.use('/api', (req, res, next) => {
     if (req.method === 'OPTIONS') {
@@ -49,16 +78,20 @@ app.get('/', (req, res) => {
     });
 });
 
-const swaggerUi = require('swagger-ui-express');
-const swaggerDocument = require('./config/swagger');
-app.get('/api-docs.json', (req, res) => res.json(swaggerDocument));
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(null, {
-    swaggerOptions: {
-        url: '/api-docs.json',
-        validatorUrl: null,
-    },
-    explorer: true,
-}));
+const enableApiDocs =
+    process.env.NODE_ENV !== 'production' || process.env.ENABLE_API_DOCS === 'true';
+if (enableApiDocs) {
+    const swaggerUi = require('swagger-ui-express');
+    const swaggerDocument = require('./config/swagger');
+    app.get('/api-docs.json', (req, res) => res.json(swaggerDocument));
+    app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(null, {
+        swaggerOptions: {
+            url: '/api-docs.json',
+            validatorUrl: null,
+        },
+        explorer: true,
+    }));
+}
 
 const authRoutes = require('./routes/auth');
 const didRoutes = require('./routes/did');
@@ -86,7 +119,11 @@ server.listen(PORT, () => {
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`CORS whitelist (base): ${corsWhitelist.join(', ')}`);
     console.log(`Health check: http://localhost:${PORT}/`);
-    console.log(`API Docs (Swagger): http://localhost:${PORT}/api-docs`);
+    if (enableApiDocs) {
+        console.log(`API Docs (Swagger): http://localhost:${PORT}/api-docs`);
+    } else {
+        console.log('API Docs (Swagger): disabled (set ENABLE_API_DOCS=true in production to enable)');
+    }
     console.log('Socket.IO initialized (CORS aligned with Express)');
 }).on('error', (err) => {
     if (err.code === 'EADDRINUSE') {

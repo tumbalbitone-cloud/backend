@@ -25,15 +25,12 @@ const errorHandler = (err, req, res, next) => {
         error = new AppError(message, 404);
     }
 
-    // Mongoose duplicate key
+    // Mongoose duplicate key — do not echo field values (enumeration risk)
     if (err.code === 11000) {
         const keyPattern = err.keyPattern || {};
         const keyValue = err.keyValue || {};
         const field = Object.keys(keyPattern)[0] || Object.keys(keyValue)[0] || 'field';
-        const value = keyValue[field];
-        const message = value !== undefined
-            ? `${field} already exists (${value})`
-            : `${field} already exists`;
+        const message = `${field} already exists`;
         error = new AppError(message, 400);
     }
 

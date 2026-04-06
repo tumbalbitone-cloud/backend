@@ -367,12 +367,11 @@ router.post('/bulk-import', adminLimiter, authMiddleware, adminMiddleware, uploa
 
         res.json({
             success: true,
-            message: `Import selesai. ${toInsert.length} akun berhasil dibuat dengan password default ${BULK_IMPORT_DEFAULT_PASSWORD}.`,
+            message: `Import selesai. ${toInsert.length} akun berhasil dibuat. Password default dikonfigurasi di server (tidak ditampilkan di respons).`,
             summary: {
                 totalRows: rows.length,
                 created: toInsert.length,
-                failed: failed.length,
-                defaultPassword: BULK_IMPORT_DEFAULT_PASSWORD
+                failed: failed.length
             },
             failed
         });

@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { authMiddleware, adminMiddleware } = require('../middleware/authMiddleware');
 const { ALLOWED_MIME, validateUploadedImageFile } = require('../utils/imageMagic');
+const { appendSignedQuery } = require('../utils/uploadSign');
 
 const uploadsDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -85,7 +86,8 @@ router.post('/', authMiddleware, adminMiddleware, (req, res, next) => {
             }
 
             const baseUrl = process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
-            const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
+            const baseFileUrl = `${baseUrl}/uploads/${req.file.filename}`;
+            const fileUrl = appendSignedQuery(baseFileUrl, req.file.filename);
 
             res.json({
                 success: true,
@@ -96,7 +98,7 @@ router.post('/', authMiddleware, adminMiddleware, (req, res, next) => {
             if (req.file?.path) {
                 fs.unlink(req.file.path, () => {});
             }
-            res.status(500).json({ success: false, error: e.message || 'Upload gagal' });
+            res.status(500).json({ success: false, error: 'Upload gagal' });
         }
     });
 });

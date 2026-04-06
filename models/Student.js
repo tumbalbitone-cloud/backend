@@ -33,6 +33,10 @@ const StudentSchema = new mongoose.Schema({
     nftTxHash: {
         type: String, // Stores the transaction hash when the NFT was minted
         default: null
+    },
+    nftMintInProgress: {
+        type: Boolean,
+        default: false
     }
 });
 

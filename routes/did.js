@@ -3,7 +3,7 @@ const router = express.Router();
 const { body, param, validationResult } = require('express-validator');
 const { ethers } = require('ethers');
 const Student = require('../models/Student');
-const { authMiddleware, userMiddleware } = require('../middleware/authMiddleware');
+const { authMiddleware, studentOnlyMiddleware } = require('../middleware/authMiddleware');
 const { didLimiter } = require('../middleware/rateLimiter');
 const { AppError } = require('../middleware/errorHandler');
 const {
@@ -31,7 +31,7 @@ const withTimeout = (promise, ms, message) => {
  * @desc    Bind wallet to student ID and issue VC
  * @access  Private (student only; token + role user required)
  */
-router.post('/bind', didLimiter, authMiddleware, userMiddleware, [
+router.post('/bind', didLimiter, authMiddleware, studentOnlyMiddleware, [
     body('userAddress')
         .notEmpty()
         .withMessage('Wallet address is required')
@@ -45,6 +45,10 @@ router.post('/bind', didLimiter, authMiddleware, userMiddleware, [
         .trim()
         .notEmpty()
         .withMessage('Student ID is required')
+        .isLength({ min: 3 })
+        .withMessage('Student ID must be at least 3 characters')
+        .matches(/^[a-zA-Z0-9]+$/)
+        .withMessage('Student ID must be alphanumeric')
 ], async (req, res, next) => {
     try {
         // Check validation errors
@@ -59,8 +63,7 @@ router.post('/bind', didLimiter, authMiddleware, userMiddleware, [
 
         let { userAddress, studentId } = req.body;
 
-        // Verify that the authenticated user owns this studentId
-        if (req.user.role === 'user' && req.user.studentId !== studentId) {
+        if (req.user.studentId !== studentId) {
             throw new AppError('You can only bind wallet to your own student ID', 403);
         }
 
@@ -228,7 +231,7 @@ router.get('/status/:address', authMiddleware, [
 router.post('/verify-and-register',
     didLimiter,
     authMiddleware,
-    userMiddleware,
+    studentOnlyMiddleware,
     [
         body('userAddress')
             .notEmpty()
@@ -274,15 +277,13 @@ router.post('/verify-and-register',
                 throw new AppError('VC does not belong to this address', 400);
             }
 
-            // Verify studentId matches authenticated user (if user role)
-            if (req.user.role === 'user' && req.user.studentId !== vc.credentialSubject.studentId) {
+            if (req.user.studentId !== vc.credentialSubject.studentId) {
                 throw new AppError('VC does not match your student ID', 403);
             }
 
             const studentId = vc.credentialSubject.studentId;
 
-            // Load student record (used for txHash persistence/response)
-            const student = await Student.findOne({ studentId });
+            let student = await Student.findOne({ studentId });
             if (!student || !student.active) {
                 throw new AppError('Student not found or inactive', 404);
             }
@@ -296,54 +297,72 @@ router.post('/verify-and-register',
                 throw new AppError('Wallet does not match bound student account', 403);
             }
 
+            // Serialize mint attempts per student (avoid duplicate concurrent mints)
+            const locked = await Student.findOneAndUpdate(
+                { studentId, active: true, nftMintInProgress: { $ne: true } },
+                { $set: { nftMintInProgress: true } },
+                { new: true }
+            );
+
+            if (!locked) {
+                const s = await Student.findOne({ studentId });
+                if (s?.nftTxHash) {
+                    return res.json({
+                        success: true,
+                        message: 'Already Registered (NFT Owned)',
+                        txHash: s.nftTxHash,
+                        nftTxHash: s.nftTxHash
+                    });
+                }
+                throw new AppError('Mint sedang diproses untuk akun ini. Coba lagi sebentar.', 429);
+            }
+
+            student = locked;
+
+            const clearMintLock = () => Student.updateOne({ studentId }, { $set: { nftMintInProgress: false } });
+
             // Call Blockchain to Register Voter (NOW ONLY MINT NFT)
             const VotingSystemArtifact = require('../contracts/VotingSystem.json');
 
             const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545");
             const privateKey = process.env.ADMIN_PRIVATE_KEY && String(process.env.ADMIN_PRIVATE_KEY).trim();
             if (!privateKey) {
+                await clearMintLock();
                 throw new AppError('ADMIN_PRIVATE_KEY is not configured', 500);
             }
             const wallet = new ethers.Wallet(privateKey, provider);
 
-            // We only need NFT contract now (VotingSystem handles NFT)
             const nftContract = new ethers.Contract(process.env.VOTING_SYSTEM_ADDRESS, VotingSystemArtifact.abi, wallet);
 
-            // 1. Mint NFT
-            // Check if already has NFT to avoid waste/error (Optional but recommended)
             try {
-                const balance = await withTimeout(nftContract.balanceOf(userAddress), 10000, "balanceOf timeout");
-                if (balance > 0) {
-                    console.log(`User ${userAddress} already has NFT. Skipping mint.`);
-                    return res.json({
-                        success: true,
-                        message: "Already Registered (NFT Owned)",
-                        txHash: student?.nftTxHash || null,
-                        nftTxHash: student?.nftTxHash || null // Already has it
-                    });
+                try {
+                    const balance = await withTimeout(nftContract.balanceOf(userAddress), 10000, "balanceOf timeout");
+                    if (balance > 0) {
+                        console.log(`User ${userAddress} already has NFT. Skipping mint.`);
+                        await clearMintLock();
+                        return res.json({
+                            success: true,
+                            message: "Already Registered (NFT Owned)",
+                            txHash: student?.nftTxHash || null,
+                            nftTxHash: student?.nftTxHash || null
+                        });
+                    }
+                } catch (e) {
+                    console.log("Error checking balance, proceeding to mint anyway:", e.message);
                 }
-            } catch (e) {
-                console.log("Error checking balance, proceeding to mint anyway:", e.message);
-            }
 
-            console.log(`Minting StudentNFT for ${userAddress} with ID ${studentId}...`);
+                console.log(`Minting StudentNFT for ${userAddress} with ID ${studentId}...`);
 
-            // Force refresh nonce to avoid "Nonce too low" issues
-            const nonce = await withTimeout(wallet.getNonce(), 10000, "getNonce timeout");
+                const nonce = await withTimeout(wallet.getNonce(), 10000, "getNonce timeout");
 
-            let nftTxHash = null;
-            try {
                 const txNft = await withTimeout(nftContract.mint(userAddress, studentId, { nonce }), 15000, "mint timeout");
                 console.log("Minting tx sent:", txNft.hash);
-                nftTxHash = txNft.hash;
+                const nftTxHash = txNft.hash;
 
-                // Save txHash to database immediately
-                if (student) {
-                    student.nftTxHash = nftTxHash;
-                    await student.save();
-                }
+                student.nftTxHash = nftTxHash;
+                student.nftMintInProgress = false;
+                await student.save();
 
-                // Fire-and-forget waiting for transaction confirmation
                 txNft.wait()
                     .then(receipt => {
                         console.log(`[ON-CHAIN] Minted NFT for: ${userAddress} in block ${receipt.blockNumber}`);
@@ -352,17 +371,20 @@ router.post('/verify-and-register',
                         console.error(`[ON-CHAIN] Minting confirmation failed for ${userAddress}:`, err);
                     });
 
+                return res.json({
+                    success: true,
+                    message: "NFT Mint transaction submitted successfully",
+                    txHash: nftTxHash,
+                    nftTxHash: nftTxHash
+                });
             } catch (err) {
+                await clearMintLock();
                 console.error("Minting failed:", err);
+                if (err instanceof AppError) {
+                    throw err;
+                }
                 throw new AppError(`Minting failed: ${err.message}`, 500);
             }
-
-            res.json({
-                success: true,
-                message: "NFT Mint transaction submitted successfully",
-                txHash: nftTxHash, // For frontend compatibility, use NFT hash
-                nftTxHash: nftTxHash
-            });
         } catch (err) {
             if (err instanceof AppError) {
                 next(err);

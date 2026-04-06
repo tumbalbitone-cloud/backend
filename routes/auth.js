@@ -6,7 +6,7 @@ const Student = require('../models/Student');
 const Admin = require('../models/Admin');
 const { generateToken, generateRefreshToken } = require('../utils/jwt');
 const { AppError } = require('../middleware/errorHandler');
-const { authLimiter } = require('../middleware/rateLimiter');
+const { authLimiter, refreshLimiter } = require('../middleware/rateLimiter');
 const { authMiddleware } = require('../middleware/authMiddleware');
 require('dotenv').config();
 
@@ -38,8 +38,6 @@ router.post('/login', authLimiter, [
         }
 
         const { username, password } = req.body;
-
-        const Admin = require('../models/Admin');
 
         // 1. Check for Admin in Database
         const adminUser = await Admin.findOne({ username });
@@ -113,7 +111,21 @@ router.post('/login', authLimiter, [
  * @desc    Refresh access token using refresh token
  * @access  Public
  */
-router.post('/refresh', [
+/**
+ * @route   GET /api/auth/me
+ * @desc    Current user from access token (for client RBAC checks)
+ * @access  Private
+ */
+router.get('/me', authMiddleware, (req, res) => {
+    res.json({
+        success: true,
+        role: req.user.role,
+        username: req.user.username,
+        ...(req.user.studentId && { studentId: req.user.studentId })
+    });
+});
+
+router.post('/refresh', refreshLimiter, [
     body('refreshToken')
         .notEmpty()
         .withMessage('Refresh token is required')
@@ -189,6 +201,10 @@ router.put('/change-password', authMiddleware, [
         const { currentPassword, newPassword } = req.body;
         const userId = req.user.id;
         const userRole = req.user.role;
+
+        if (currentPassword === newPassword) {
+            throw new AppError('Password baru harus berbeda dari password saat ini', 400);
+        }
 
         let user;
         if (userRole === 'admin') {

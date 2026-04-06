@@ -40,6 +40,20 @@ const authLimiter = rateLimit({
 });
 
 /**
+ * Refresh token endpoint — same window as auth, stricter than general API
+ */
+const refreshLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+    message: {
+        success: false,
+        error: 'Too many token refresh attempts from this IP, please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+/**
  * Rate Limiter for DID Operations
  * 10 requests per hour per IP
  * Prevents abuse of wallet binding and verification
@@ -90,6 +104,7 @@ const adminLimiter = rateLimit({
 module.exports = {
     apiLimiter,
     authLimiter,
+    refreshLimiter,
     didLimiter,
     votingLimiter,
     adminLimiter

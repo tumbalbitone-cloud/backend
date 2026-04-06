@@ -129,10 +129,28 @@ const optionalAuthMiddleware = (req, res, next) => {
     }
 };
 
+/**
+ * Student-only (role user). Use on DID / student-facing routes — admins must not impersonate students.
+ */
+const studentOnlyMiddleware = (req, res, next) => {
+    try {
+        if (!req.user) {
+            throw new AppError('Authentication required', 401);
+        }
+        if (req.user.role !== 'user') {
+            throw new AppError('Student access required', 403);
+        }
+        next();
+    } catch (err) {
+        next(err);
+    }
+};
+
 module.exports = {
     authMiddleware,
     adminMiddleware,
     userMiddleware,
+    studentOnlyMiddleware,
     optionalAuthMiddleware
 };
 

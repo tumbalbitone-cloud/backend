@@ -3,9 +3,28 @@ const { ethers } = require("ethers");
 const fs = require("fs");
 const path = require("path");
 const { createCorsPolicy } = require("../config/corsPolicy");
+const { verifyToken } = require("./jwt");
 
 let io;
 let pollingIntervalId = null;
+
+/**
+ * Optional JWT on handshake — used for join_admin; anonymous allowed for join_session.
+ */
+const socketAuthMiddleware = (socket, next) => {
+    const raw = socket.handshake.auth?.token;
+    if (!raw || typeof raw !== "string") {
+        socket.user = null;
+        return next();
+    }
+    try {
+        socket.user = verifyToken(raw);
+        return next();
+    } catch {
+        socket.user = null;
+        return next();
+    }
+};
 
 /**
  * @param {import('http').Server} server
@@ -16,35 +35,75 @@ const initializeSocket = (server, options = {}) => {
     const cors = options.cors ?? createCorsPolicy(port).socketIoCors;
     io = new Server(server, { cors });
 
-    io.on("connection", (socket) => {
-        console.log("New User connected via Socket.io:", socket.id);
+    io.use(socketAuthMiddleware);
 
-        socket.on("disconnect", () => {
-            console.log("User disconnected:", socket.id);
+    io.on("connection", (socket) => {
+        socket.on("join_session", (sessionId) => {
+            const n = Number(sessionId);
+            if (!Number.isFinite(n) || n < 0) return;
+            socket.join(`session:${n}`);
         });
+        socket.on("join_admin", () => {
+            if (socket.user?.role === "admin") {
+                socket.join("admin");
+            }
+        });
+        socket.on("disconnect", () => {});
     });
 
-    setupContractListener();
+    setupContractListener().catch((err) => {
+        console.error("❌ Contract listener failed to start:", err.message || err);
+    });
     return io;
 };
 
-/**
- * Emit event ke Socket.IO klien dengan deduplikasi
- */
 const emittedEvents = new Set();
-const EMITTED_TTL = 120000; // 2 menit, lalu hapus untuk hindari memory leak
+const EMITTED_TTL = 120000;
 
-const emitEvent = (eventId, eventName, payload) => {
+const runDeduped = (eventId, emitFn) => {
     if (emittedEvents.has(eventId)) return;
     emittedEvents.add(eventId);
-    if (io) io.emit(eventName, payload);
-    // Cleanup TTL sederhana - hapus setelah delay
+    emitFn();
     setTimeout(() => emittedEvents.delete(eventId), EMITTED_TTL);
 };
 
-/**
- * Setup provider: WebSocket jika URL ws:// atau wss://, selain itu JsonRpcProvider
- */
+/** vote_update: no voter address (privacy). Only clients in session room receive. */
+const emitVoteUpdate = (eventId, sessionId, candidateId) => {
+    const sid = Number(sessionId);
+    runDeduped(eventId, () => {
+        if (!io) return;
+        const payload = {
+            sessionId: String(sessionId),
+            candidateId: String(candidateId),
+            timestamp: new Date().toISOString()
+        };
+        io.to(`session:${sid}`).emit("vote_update", payload);
+    });
+};
+
+const emitSessionScoped = (eventId, eventName, sessionId, payload) => {
+    const sid = Number(sessionId);
+    runDeduped(eventId, () => {
+        if (!io) return;
+        io.to(`session:${sid}`).to("admin").emit(eventName, payload);
+    });
+};
+
+const emitSessionOnly = (eventId, eventName, sessionId, payload) => {
+    const sid = Number(sessionId);
+    runDeduped(eventId, () => {
+        if (!io) return;
+        io.to(`session:${sid}`).emit(eventName, payload);
+    });
+};
+
+const emitGlobal = (eventId, eventName, payload) => {
+    runDeduped(eventId, () => {
+        if (!io) return;
+        io.emit(eventName, payload);
+    });
+};
+
 const createProvider = () => {
     const rpcUrl = (process.env.BLOCKCHAIN_WS_URL || process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545").trim();
     if (rpcUrl.startsWith("ws://") || rpcUrl.startsWith("wss://")) {
@@ -59,10 +118,6 @@ const createProvider = () => {
     return new ethers.JsonRpcProvider(rpcUrl);
 };
 
-/**
- * Polling fallback: query event dari blockchain secara berkala
- * Penting untuk Hardhat node yang kadang tidak emit event via subscription
- */
 const setupPollingFallback = async (contract) => {
     const pollIntervalMs = parseInt(process.env.EVENT_POLL_INTERVAL_MS, 10) || 5000;
     let lastBlock = 0;
@@ -88,18 +143,13 @@ const setupPollingFallback = async (contract) => {
                         case "Voted": {
                             const [sessionId, voter, candidateId] = Array.isArray(args) ? args : [args.sessionId, args.voter, args.candidateId];
                             console.log(`🔔 [Poll] Voted - Session ${sessionId}, Candidate ${candidateId}`);
-                            emitEvent(eventId, "vote_update", {
-                                sessionId: sessionId.toString(),
-                                candidateId: candidateId.toString(),
-                                voter,
-                                timestamp: new Date().toISOString()
-                            });
+                            emitVoteUpdate(eventId, sessionId, candidateId);
                             break;
                         }
                         case "SessionStatusChanged": {
                             const [sessionId, isActive] = Array.isArray(args) ? args : [args.sessionId, args.isActive];
                             console.log(`🔔 [Poll] SessionStatusChanged - Session ${sessionId}`);
-                            emitEvent(eventId, "session_update", {
+                            emitSessionScoped(eventId, "session_update", sessionId, {
                                 sessionId: sessionId.toString(),
                                 isActive
                             });
@@ -108,7 +158,7 @@ const setupPollingFallback = async (contract) => {
                         case "SessionCreated": {
                             const [sessionId, _name, startTime, endTime] = Array.isArray(args) ? args : [args.sessionId, args.name, args.startTime, args.endTime];
                             console.log(`🔔 [Poll] SessionCreated - ${_name}`);
-                            emitEvent(eventId, "session_created", {
+                            emitGlobal(eventId, "session_created", {
                                 sessionId: sessionId.toString(),
                                 name: _name,
                                 startTime: startTime.toString(),
@@ -119,7 +169,7 @@ const setupPollingFallback = async (contract) => {
                         case "CandidateAdded": {
                             const [sessionId, candidateId, _candName, photoUrl] = Array.isArray(args) ? args : [args.sessionId, args.candidateId, args.name, args.photoUrl];
                             console.log(`🔔 [Poll] CandidateAdded - Session ${sessionId}, ${_candName}`);
-                            emitEvent(eventId, "candidate_added", {
+                            emitSessionOnly(eventId, "candidate_added", sessionId, {
                                 sessionId: sessionId.toString(),
                                 candidateId: candidateId.toString(),
                                 name: _candName,
@@ -129,7 +179,7 @@ const setupPollingFallback = async (contract) => {
                         }
                     }
                 } catch (parseErr) {
-                    // Bukan event dari kontrak kita, skip
+                    // skip
                 }
             }
         } catch (err) {
@@ -174,30 +224,24 @@ const setupContractListener = async () => {
 
         console.log(`✅ Listening for Blockchain events on: ${contractAddress}`);
 
-        // Event handler helper - gunakan event dari log untuk deduplikasi
         const handleVoted = (sessionId, voter, candidateId, event) => {
             const eventId = event?.log?.blockNumber && event?.log?.transactionHash
                 ? `${event.log.blockNumber}-${event.log.transactionHash}-${event.log.index}`
                 : `${Date.now()}-${voter}-${candidateId}`;
             console.log(`🔔 Blockchain Event: Voted - Session ${sessionId}, Candidate ${candidateId}`);
-            emitEvent(eventId, "vote_update", {
-                sessionId: sessionId.toString(),
-                candidateId: candidateId.toString(),
-                voter,
-                timestamp: new Date().toISOString()
-            });
+            emitVoteUpdate(eventId, sessionId, candidateId);
         };
 
         const handleSessionStatusChanged = (sessionId, isActive, event) => {
             const eventId = event?.log ? `${event.log.blockNumber}-${event.log.transactionHash}-${event.log.index}` : `session-${sessionId}-${Date.now()}`;
             console.log(`🔔 Blockchain Event: SessionStatusChanged - Session ${sessionId} is now ${isActive ? "Active" : "Closed"}`);
-            emitEvent(eventId, "session_update", { sessionId: sessionId.toString(), isActive });
+            emitSessionScoped(eventId, "session_update", sessionId, { sessionId: sessionId.toString(), isActive });
         };
 
         const handleSessionCreated = (sessionId, name, startTime, endTime, event) => {
             const eventId = event?.log ? `${event.log.blockNumber}-${event.log.transactionHash}-${event.log.index}` : `create-${sessionId}-${Date.now()}`;
             console.log(`🔔 Blockchain Event: SessionCreated - ${name}`);
-            emitEvent(eventId, "session_created", {
+            emitGlobal(eventId, "session_created", {
                 sessionId: sessionId.toString(),
                 name,
                 startTime: startTime.toString(),
@@ -208,7 +252,7 @@ const setupContractListener = async () => {
         const handleCandidateAdded = (sessionId, candidateId, name, photoUrl, event) => {
             const eventId = event?.log ? `${event.log.blockNumber}-${event.log.transactionHash}-${event.log.index}` : `candidate-${sessionId}-${candidateId}-${Date.now()}`;
             console.log(`🔔 Blockchain Event: CandidateAdded - Session ${sessionId}, Candidate ${name}`);
-            emitEvent(eventId, "candidate_added", {
+            emitSessionOnly(eventId, "candidate_added", sessionId, {
                 sessionId: sessionId.toString(),
                 candidateId: candidateId.toString(),
                 name,
@@ -221,13 +265,11 @@ const setupContractListener = async () => {
         contract.on("SessionCreated", handleSessionCreated);
         contract.on("CandidateAdded", handleCandidateAdded);
 
-        // Polling fallback: selalu aktif untuk HTTP (Hardhat), opsional untuk WebSocket
         const usePolling = !isWs || process.env.EVENT_POLL_BACKUP === "true";
         if (usePolling) {
             await setupPollingFallback(contract);
         }
 
-        // Cleanup polling on process exit
         process.on("SIGTERM", () => {
             if (pollingIntervalId) clearInterval(pollingIntervalId);
         });
