@@ -1,9 +1,8 @@
 const { Server } = require("socket.io");
-const { ethers } = require("ethers");
-const fs = require("fs");
-const path = require("path");
 const { createCorsPolicy } = require("../config/corsPolicy");
 const { verifyToken } = require("./jwt");
+const { invalidateReadModel } = require("./blockchainReadModel");
+const { getEventContract, getEventProvider, getContractAddress } = require("./blockchainClient");
 
 let io;
 let pollingIntervalId = null;
@@ -72,6 +71,7 @@ const emitVoteUpdate = (eventId, sessionId, candidateId) => {
     const sid = Number(sessionId);
     runDeduped(eventId, () => {
         if (!io) return;
+        invalidateReadModel({ sessionId: sid });
         const payload = {
             sessionId: String(sessionId),
             candidateId: String(candidateId),
@@ -85,6 +85,7 @@ const emitSessionScoped = (eventId, eventName, sessionId, payload) => {
     const sid = Number(sessionId);
     runDeduped(eventId, () => {
         if (!io) return;
+        invalidateReadModel({ sessionId: sid, sessions: true });
         io.to(`session:${sid}`).to("admin").emit(eventName, payload);
     });
 };
@@ -93,6 +94,7 @@ const emitSessionOnly = (eventId, eventName, sessionId, payload) => {
     const sid = Number(sessionId);
     runDeduped(eventId, () => {
         if (!io) return;
+        invalidateReadModel({ sessionId: sid });
         io.to(`session:${sid}`).emit(eventName, payload);
     });
 };
@@ -100,22 +102,9 @@ const emitSessionOnly = (eventId, eventName, sessionId, payload) => {
 const emitGlobal = (eventId, eventName, payload) => {
     runDeduped(eventId, () => {
         if (!io) return;
+        invalidateReadModel({ sessions: true });
         io.emit(eventName, payload);
     });
-};
-
-const createProvider = () => {
-    const rpcUrl = (process.env.BLOCKCHAIN_WS_URL || process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545").trim();
-    if (rpcUrl.startsWith("ws://") || rpcUrl.startsWith("wss://")) {
-        try {
-            return new ethers.WebSocketProvider(rpcUrl);
-        } catch (e) {
-            console.warn("⚠️ WebSocket provider gagal, fallback ke HTTP:", e.message);
-            const httpUrl = process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545";
-            return new ethers.JsonRpcProvider(httpUrl);
-        }
-    }
-    return new ethers.JsonRpcProvider(rpcUrl);
 };
 
 const setupPollingFallback = async (contract) => {
@@ -167,13 +156,12 @@ const setupPollingFallback = async (contract) => {
                             break;
                         }
                         case "CandidateAdded": {
-                            const [sessionId, candidateId, _candName, photoUrl] = Array.isArray(args) ? args : [args.sessionId, args.candidateId, args.name, args.photoUrl];
+                            const [sessionId, candidateId, _candName] = Array.isArray(args) ? args : [args.sessionId, args.candidateId, args.name];
                             console.log(`🔔 [Poll] CandidateAdded - Session ${sessionId}, ${_candName}`);
                             emitSessionOnly(eventId, "candidate_added", sessionId, {
                                 sessionId: sessionId.toString(),
                                 candidateId: candidateId.toString(),
                                 name: _candName,
-                                photoUrl
                             });
                             break;
                         }
@@ -194,7 +182,7 @@ const setupPollingFallback = async (contract) => {
 
 const setupContractListener = async () => {
     try {
-        const provider = createProvider();
+        const provider = getEventProvider();
         const isWs = provider.constructor.name === "WebSocketProvider";
         if (isWs) {
             console.log("✅ Menggunakan WebSocket provider untuk event real-time");
@@ -202,25 +190,13 @@ const setupContractListener = async () => {
             console.log("✅ Menggunakan HTTP provider (JsonRpcProvider)");
         }
 
-        const contractAddress = process.env.VOTING_SYSTEM_ADDRESS;
+        const contractAddress = getContractAddress();
         if (!contractAddress) {
             console.error("❌ VOTING_SYSTEM_ADDRESS not set in .env, skipping contract listener.");
             return;
         }
 
-        const abiPath = path.join(__dirname, "../contracts/VotingSystem.json");
-        if (!fs.existsSync(abiPath)) {
-            console.error("❌ VotingSystem.json not found at:", abiPath);
-            return;
-        }
-
-        const contractArtifact = JSON.parse(fs.readFileSync(abiPath, "utf8"));
-        if (!contractArtifact.abi) {
-            console.error("❌ Invalid ABI file format.");
-            return;
-        }
-
-        const contract = new ethers.Contract(contractAddress, contractArtifact.abi, provider);
+        const contract = getEventContract();
 
         console.log(`✅ Listening for Blockchain events on: ${contractAddress}`);
 
@@ -249,14 +225,13 @@ const setupContractListener = async () => {
             });
         };
 
-        const handleCandidateAdded = (sessionId, candidateId, name, photoUrl, event) => {
+        const handleCandidateAdded = (sessionId, candidateId, name, event) => {
             const eventId = event?.log ? `${event.log.blockNumber}-${event.log.transactionHash}-${event.log.index}` : `candidate-${sessionId}-${candidateId}-${Date.now()}`;
             console.log(`🔔 Blockchain Event: CandidateAdded - Session ${sessionId}, Candidate ${name}`);
             emitSessionOnly(eventId, "candidate_added", sessionId, {
                 sessionId: sessionId.toString(),
                 candidateId: candidateId.toString(),
                 name,
-                photoUrl
             });
         };
 

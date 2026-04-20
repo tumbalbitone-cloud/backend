@@ -97,11 +97,15 @@ const authRoutes = require('./routes/auth');
 const didRoutes = require('./routes/did');
 const userRoutes = require('./routes/users');
 const uploadRoutes = require('./routes/uploadRoutes');
+const readModelRoutes = require('./routes/readModel');
+const candidateRoutes = require('./routes/candidates');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/did', didRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/read-model', readModelRoutes);
+app.use('/api/candidates', candidateRoutes);
 
 app.use((req, res, next) => {
     res.status(404).json({

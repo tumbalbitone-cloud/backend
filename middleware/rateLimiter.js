@@ -29,7 +29,7 @@ const apiLimiter = rateLimit({
  */
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5, // Limit each IP to 5 login requests per windowMs
+    max: 10, // Limit each IP to 10 login requests per windowMs
     message: {
         success: false,
         error: 'Too many login attempts from this IP, please try again after 15 minutes.'
@@ -92,7 +92,7 @@ const votingLimiter = rateLimit({
  */
 const adminLimiter = rateLimit({
     windowMs: 60 * 1000, // 1 minute
-    max: 20, // Limit each IP to 20 admin operations per minute
+    max: 15, // Limit each IP to 15 admin operations per minute
     message: {
         success: false,
         error: 'Too many admin operations, please slow down.'

@@ -13,6 +13,15 @@ const {
     isValidAddress,
     createDidFromAddress
 } = require('../utils/vc');
+const {
+    createWalletBindChallenge,
+    verifyWalletBindChallenge,
+} = require('../utils/walletBindChallenge');
+const {
+    getReadContract,
+    getWriteContract,
+    getWriteSigner,
+} = require('../utils/blockchainClient');
 
 // Helper to prevent hanging Promises
 const withTimeout = (promise, ms, message) => {
@@ -25,6 +34,63 @@ const withTimeout = (promise, ms, message) => {
         timeoutPromise
     ]).finally(() => clearTimeout(timer));
 };
+
+/**
+ * @route   POST /api/did/bind/challenge
+ * @desc    Create a short-lived message that must be signed by the target wallet
+ * @access  Private (student only; token + role user required)
+ */
+router.post('/bind/challenge', didLimiter, authMiddleware, studentOnlyMiddleware, [
+    body('userAddress')
+        .notEmpty()
+        .withMessage('Wallet address is required')
+        .custom((value) => {
+            if (!isValidAddress(value)) {
+                throw new Error('Invalid Ethereum address format');
+            }
+            return true;
+        }),
+    body('studentId')
+        .trim()
+        .notEmpty()
+        .withMessage('Student ID is required')
+        .isLength({ min: 3 })
+        .withMessage('Student ID must be at least 3 characters')
+        .matches(/^[a-zA-Z0-9]+$/)
+        .withMessage('Student ID must be alphanumeric')
+], async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                success: false,
+                error: 'Validation failed',
+                details: errors.array()
+            });
+        }
+
+        const studentId = String(req.body.studentId || '').trim();
+        const userAddress = ethers.getAddress(req.body.userAddress);
+
+        if (req.user.studentId !== studentId) {
+            throw new AppError('You can only bind wallet to your own student ID', 403);
+        }
+
+        const challenge = createWalletBindChallenge({
+            studentId,
+            address: userAddress,
+        });
+
+        return res.json({
+            success: true,
+            challengeToken: challenge.challengeToken,
+            message: challenge.message,
+            expiresAt: challenge.expiresAt,
+        });
+    } catch (err) {
+        next(err);
+    }
+});
 
 /**
  * @route   POST /api/did/bind
@@ -48,7 +114,15 @@ router.post('/bind', didLimiter, authMiddleware, studentOnlyMiddleware, [
         .isLength({ min: 3 })
         .withMessage('Student ID must be at least 3 characters')
         .matches(/^[a-zA-Z0-9]+$/)
-        .withMessage('Student ID must be alphanumeric')
+        .withMessage('Student ID must be alphanumeric'),
+    body('signature')
+        .trim()
+        .notEmpty()
+        .withMessage('Wallet signature is required'),
+    body('challengeToken')
+        .trim()
+        .notEmpty()
+        .withMessage('Wallet bind challenge token is required')
 ], async (req, res, next) => {
     try {
         // Check validation errors
@@ -61,7 +135,7 @@ router.post('/bind', didLimiter, authMiddleware, studentOnlyMiddleware, [
             });
         }
 
-        let { userAddress, studentId } = req.body;
+        let { userAddress, studentId, signature, challengeToken } = req.body;
 
         if (req.user.studentId !== studentId) {
             throw new AppError('You can only bind wallet to your own student ID', 403);
@@ -71,6 +145,20 @@ router.post('/bind', didLimiter, authMiddleware, studentOnlyMiddleware, [
         userAddress = ethers.getAddress(userAddress); // Normalize address
 
         const normalizedAddress = userAddress.toLowerCase();
+        const challenge = verifyWalletBindChallenge(challengeToken);
+
+        if (challenge.studentId !== studentId) {
+            throw new AppError('Wallet bind challenge does not match this student ID', 400);
+        }
+
+        if (challenge.address !== normalizedAddress) {
+            throw new AppError('Wallet bind challenge does not match this wallet address', 400);
+        }
+
+        const recoveredAddress = ethers.verifyMessage(challenge.message, signature).toLowerCase();
+        if (recoveredAddress !== normalizedAddress) {
+            throw new AppError('Wallet signature is invalid for this address', 401);
+        }
 
         // Atomic bind:
         // - only active student can be bound
@@ -127,6 +215,9 @@ router.post('/bind', didLimiter, authMiddleware, studentOnlyMiddleware, [
             message: "Wallet bound successfully"
         });
     } catch (err) {
+        if (err?.name === 'TokenExpiredError' || err?.name === 'JsonWebTokenError') {
+            return next(new AppError('Wallet bind challenge is invalid or expired', 401));
+        }
         if (err?.code === 11000) {
             return next(new AppError('Wallet already bound to another student ID', 400));
         }
@@ -176,12 +267,7 @@ router.get('/status/:address', authMiddleware, [
             let vcJwt = null;
 
             try {
-                // Check NFT balance
-                const VotingSystemArtifact = require('../contracts/VotingSystem.json');
-                const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545");
-                const nftContract = new ethers.Contract(process.env.VOTING_SYSTEM_ADDRESS, VotingSystemArtifact.abi, provider);
-
-                // Get balance strictly for this address
+                const nftContract = getReadContract();
                 const balance = await nftContract.balanceOf(normalizedAddress);
                 if (balance > 0) {
                     nftClaimed = true;
@@ -321,20 +407,9 @@ router.post('/verify-and-register',
 
             const clearMintLock = () => Student.updateOne({ studentId }, { $set: { nftMintInProgress: false } });
 
-            // Call Blockchain to Register Voter (NOW ONLY MINT NFT)
-            const VotingSystemArtifact = require('../contracts/VotingSystem.json');
-
-            const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545");
-            const privateKey = process.env.ADMIN_PRIVATE_KEY && String(process.env.ADMIN_PRIVATE_KEY).trim();
-            if (!privateKey) {
-                await clearMintLock();
-                throw new AppError('ADMIN_PRIVATE_KEY is not configured', 500);
-            }
-            const wallet = new ethers.Wallet(privateKey, provider);
-
-            const nftContract = new ethers.Contract(process.env.VOTING_SYSTEM_ADDRESS, VotingSystemArtifact.abi, wallet);
-
             try {
+                const wallet = getWriteSigner();
+                const nftContract = getWriteContract();
                 try {
                     const balance = await withTimeout(nftContract.balanceOf(userAddress), 10000, "balanceOf timeout");
                     if (balance > 0) {
