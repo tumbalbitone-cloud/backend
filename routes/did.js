@@ -3,7 +3,7 @@ const router = express.Router();
 const { body, param, validationResult } = require('express-validator');
 const { ethers } = require('ethers');
 const Student = require('../models/Student');
-const { authMiddleware, studentOnlyMiddleware } = require('../middleware/authMiddleware');
+const { authMiddleware, adminMiddleware, studentOnlyMiddleware } = require('../middleware/authMiddleware');
 const { didLimiter } = require('../middleware/rateLimiter');
 const { AppError } = require('../middleware/errorHandler');
 const {
@@ -34,6 +34,217 @@ const withTimeout = (promise, ms, message) => {
         timeoutPromise
     ]).finally(() => clearTimeout(timer));
 };
+
+const getAdminBindSubject = (user) => `admin:${user.username || user.id}`;
+
+const sendValidationErrorResponse = (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        res.status(400).json({
+            success: false,
+            error: 'Validation failed',
+            details: errors.array()
+        });
+        return true;
+    }
+    return false;
+};
+
+const walletAddressValidator = () =>
+    body('userAddress')
+        .notEmpty()
+        .withMessage('Wallet address is required')
+        .custom((value) => {
+            if (!isValidAddress(value)) {
+                throw new Error('Invalid Ethereum address format');
+            }
+            return true;
+        });
+
+/**
+ * @route   POST /api/did/admin-wallet/challenge
+ * @desc    Create a wallet binding challenge for the authenticated admin
+ * @access  Admin only
+ */
+router.post('/admin-wallet/challenge', didLimiter, authMiddleware, adminMiddleware, [
+    walletAddressValidator()
+], async (req, res, next) => {
+    try {
+        if (sendValidationErrorResponse(req, res)) return;
+
+        const userAddress = ethers.getAddress(req.body.userAddress);
+        const challenge = createWalletBindChallenge({
+            studentId: getAdminBindSubject(req.user),
+            address: userAddress,
+        });
+
+        return res.json({
+            success: true,
+            challengeToken: challenge.challengeToken,
+            message: challenge.message,
+            expiresAt: challenge.expiresAt,
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+/**
+ * @route   GET /api/did/admin-wallet/status/:address
+ * @desc    Check whether an admin wallet can be used by the authenticated admin
+ * @access  Admin only
+ */
+router.get('/admin-wallet/status/:address', authMiddleware, adminMiddleware, [
+    param('address')
+        .notEmpty()
+        .withMessage('Address parameter is required')
+        .custom((value) => {
+            if (!isValidAddress(value)) {
+                throw new Error('Invalid Ethereum address format');
+            }
+            return true;
+        })
+], async (req, res, next) => {
+    try {
+        if (sendValidationErrorResponse(req, res)) return;
+
+        const normalizedAddress = ethers.getAddress(req.params.address);
+        const normalizedAddressKey = normalizedAddress.toLowerCase();
+        const admin = await Student.findOne({ _id: req.user.id, role: 'admin' }, 'claimedBy claimedByNormalized active');
+        if (!admin || !admin.active) {
+            throw new AppError('Admin not found or inactive', 404);
+        }
+
+        const existingOwner = await Student.findOne(
+            {
+                _id: { $ne: req.user.id },
+                $or: [
+                    { claimedByNormalized: normalizedAddressKey },
+                    { claimedBy: { $regex: new RegExp(`^${normalizedAddress}$`, 'i') } }
+                ]
+            },
+            'username studentId role'
+        );
+        if (existingOwner) {
+            return res.status(409).json({
+                success: false,
+                error: 'Wallet already bound to another account'
+            });
+        }
+
+        const boundAddress = admin.claimedByNormalized || String(admin.claimedBy || '').toLowerCase();
+        if (!boundAddress) {
+            return res.json({
+                success: true,
+                bound: false,
+                matches: false
+            });
+        }
+
+        if (boundAddress !== normalizedAddressKey) {
+            return res.status(409).json({
+                success: false,
+                error: 'Admin account already bound to another wallet',
+                bound: true,
+                matches: false,
+                address: admin.claimedBy
+            });
+        }
+
+        return res.json({
+            success: true,
+            bound: true,
+            matches: true,
+            address: admin.claimedBy
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+/**
+ * @route   POST /api/did/admin-wallet/bind
+ * @desc    Bind exactly one wallet address to the authenticated admin account
+ * @access  Admin only
+ */
+router.post('/admin-wallet/bind', didLimiter, authMiddleware, adminMiddleware, [
+    walletAddressValidator(),
+    body('signature')
+        .trim()
+        .notEmpty()
+        .withMessage('Wallet signature is required'),
+    body('challengeToken')
+        .trim()
+        .notEmpty()
+        .withMessage('Wallet bind challenge token is required')
+], async (req, res, next) => {
+    try {
+        if (sendValidationErrorResponse(req, res)) return;
+
+        const userAddress = ethers.getAddress(req.body.userAddress);
+        const normalizedAddress = userAddress.toLowerCase();
+        const challenge = verifyWalletBindChallenge(req.body.challengeToken);
+
+        if (challenge.studentId !== getAdminBindSubject(req.user)) {
+            throw new AppError('Wallet bind challenge does not match this admin account', 400);
+        }
+
+        if (challenge.address !== normalizedAddress) {
+            throw new AppError('Wallet bind challenge does not match this wallet address', 400);
+        }
+
+        const recoveredAddress = ethers.verifyMessage(challenge.message, req.body.signature).toLowerCase();
+        if (recoveredAddress !== normalizedAddress) {
+            throw new AppError('Wallet signature is invalid for this address', 401);
+        }
+
+        const admin = await Student.findOneAndUpdate(
+            {
+                _id: req.user.id,
+                role: 'admin',
+                active: true,
+                $or: [
+                    { claimedBy: null },
+                    { claimedBy: { $exists: false } },
+                    { claimedBy: { $regex: new RegExp(`^${userAddress}$`, 'i') } },
+                    { claimedByNormalized: normalizedAddress }
+                ]
+            },
+            {
+                $set: {
+                    claimedBy: userAddress,
+                    claimedByNormalized: normalizedAddress
+                }
+            },
+            { new: true }
+        );
+
+        if (!admin) {
+            const existingAdmin = await Student.findOne({ _id: req.user.id, role: 'admin' }, 'claimedBy active');
+            if (!existingAdmin || !existingAdmin.active) {
+                throw new AppError('Admin not found or inactive', 404);
+            }
+            if (existingAdmin.claimedBy && existingAdmin.claimedBy.toLowerCase() !== normalizedAddress) {
+                throw new AppError('Admin account already bound to another wallet', 400);
+            }
+            throw new AppError('Failed to bind admin wallet', 400);
+        }
+
+        res.json({
+            success: true,
+            address: admin.claimedBy,
+            message: 'Admin wallet bound successfully'
+        });
+    } catch (err) {
+        if (err?.name === 'TokenExpiredError' || err?.name === 'JsonWebTokenError') {
+            return next(new AppError('Wallet bind challenge is invalid or expired', 401));
+        }
+        if (err?.code === 11000) {
+            return next(new AppError('Wallet already bound to another account', 400));
+        }
+        next(err);
+    }
+});
 
 /**
  * @route   POST /api/did/bind/challenge

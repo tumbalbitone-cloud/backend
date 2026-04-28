@@ -20,6 +20,22 @@ const upload = multer({
 
 const STUDENT_ID_REGEX = /^[a-zA-Z0-9]+$/;
 
+const getDuplicateUserMessage = (error) => {
+    if (error?.code !== 11000) return null;
+
+    const duplicateFields = Object.keys(error.keyPattern || error.keyValue || {});
+    if (duplicateFields.includes('username')) {
+        return 'Username/NIM sudah digunakan akun lain';
+    }
+    if (duplicateFields.includes('studentId')) {
+        return 'studentId/nim sudah terdaftar';
+    }
+    if (duplicateFields.includes('claimedByNormalized')) {
+        return 'Wallet sudah tertaut ke akun lain';
+    }
+    return 'User already exists';
+};
+
 const getCellValue = (row = {}, aliases = []) => {
     const normalizedRow = {};
     for (const [key, value] of Object.entries(row)) {
@@ -150,7 +166,7 @@ router.get('/list', adminLimiter, authMiddleware, adminMiddleware, [
         const q = String(req.query.q || '').trim();
         const limit = parseInt(req.query.limit, 10) || 300;
 
-        const filter = {};
+        const filter = { role: { $ne: 'admin' } };
         if (q) {
             const safeQuery = escapeRegex(q);
             filter.$or = [
@@ -220,7 +236,12 @@ router.post('/create', adminLimiter, authMiddleware, adminMiddleware, [
         const { studentId, name, password } = req.body;
 
         // Check for existing user
-        const existingStudent = await Student.findOne({ studentId });
+        const existingStudent = await Student.findOne({
+            $or: [
+                { studentId },
+                { username: studentId }
+            ]
+        });
         if (existingStudent) {
             throw new AppError('User already exists', 400);
         }
@@ -231,8 +252,10 @@ router.post('/create', adminLimiter, authMiddleware, adminMiddleware, [
 
         const newStudent = new Student({
             studentId,
+            username: studentId,
             name,
             password: hashedPassword,
+            role: 'user',
             claimedByNormalized: undefined
         });
 
@@ -249,6 +272,10 @@ router.post('/create', adminLimiter, authMiddleware, adminMiddleware, [
             }
         });
     } catch (err) {
+        const duplicateMessage = getDuplicateUserMessage(err);
+        if (duplicateMessage) {
+            return next(new AppError(duplicateMessage, 400));
+        }
         next(err);
     }
 });
@@ -335,11 +362,21 @@ router.post('/bulk-import', adminLimiter, authMiddleware, adminMiddleware, uploa
             });
         }
 
+        const existingUsers = await Student.find(
+            {
+                $or: [
+                    { studentId: { $in: candidates.map((item) => item.studentId) } },
+                    { username: { $in: candidates.map((item) => item.studentId) } }
+                ]
+            },
+            'studentId username'
+        );
+
         const existingStudentIds = new Set(
-            (await Student.find(
-                { studentId: { $in: candidates.map((item) => item.studentId) } },
-                'studentId'
-            )).map((student) => student.studentId.toLowerCase())
+            existingUsers
+                .flatMap((user) => [user.studentId, user.username])
+                .filter(Boolean)
+                .map((value) => String(value).toLowerCase())
         );
 
         const toInsert = [];
@@ -355,8 +392,10 @@ router.post('/bulk-import', adminLimiter, authMiddleware, adminMiddleware, uploa
 
             toInsert.push({
                 studentId: row.studentId,
+                username: row.studentId,
                 name: row.name,
                 password: hashedBulkPassword,
+                role: 'user',
                 claimedByNormalized: undefined
             });
         }
@@ -381,6 +420,10 @@ router.post('/bulk-import', adminLimiter, authMiddleware, adminMiddleware, uploa
                 return next(new AppError('Ukuran file maksimal 5 MB', 400));
             }
             return next(new AppError('Upload file gagal', 400));
+        }
+        const duplicateMessage = getDuplicateUserMessage(err);
+        if (duplicateMessage) {
+            return next(new AppError(duplicateMessage, 400));
         }
         next(err);
     }
@@ -419,7 +462,7 @@ router.post('/resolve-voter-addresses', adminLimiter, authMiddleware, adminMiddl
         )];
 
         const students = await Student.find(
-            { studentId: { $in: normalizedStudentIds } },
+            { role: { $ne: 'admin' }, studentId: { $in: normalizedStudentIds } },
             'studentId name active claimedBy'
         );
 
@@ -462,4 +505,107 @@ router.post('/resolve-voter-addresses', adminLimiter, authMiddleware, adminMiddl
     }
 });
 
+/**
+ * @route   GET /api/users/admins
+ * @desc    List all admin accounts
+ * @access  Admin only (token + role admin required)
+ */
+router.get('/admins', adminLimiter, authMiddleware, adminMiddleware, async (req, res, next) => {
+    try {
+        const admins = await Student.find(
+            { role: 'admin' },
+            'username name active createdAt'
+        ).sort({ createdAt: 1 });
+
+        res.json({
+            success: true,
+            admins: admins.map((admin) => ({
+                id: admin._id,
+                username: admin.username,
+                name: admin.name,
+                active: admin.active
+            }))
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+/**
+ * @route   POST /api/users/create-admin
+ * @desc    Create a new admin account
+ * @access  Admin only (token + role admin required)
+ */
+router.post('/create-admin', adminLimiter, authMiddleware, adminMiddleware, [
+    body('username')
+        .trim()
+        .notEmpty()
+        .withMessage('Username is required')
+        .isLength({ min: 3, max: 50 })
+        .withMessage('Username must be between 3 and 50 characters')
+        .matches(/^[a-zA-Z0-9_]+$/)
+        .withMessage('Username must contain only alphanumeric characters and underscores'),
+    body('name')
+        .trim()
+        .notEmpty()
+        .withMessage('Name is required')
+        .isLength({ min: 2, max: 100 })
+        .withMessage('Name must be between 2 and 100 characters'),
+    body('password')
+        .notEmpty()
+        .withMessage('Password is required')
+        .isLength({ min: 8 })
+        .withMessage('Admin password must be at least 8 characters')
+], async (req, res, next) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                success: false,
+                error: 'Validation failed',
+                details: errors.array()
+            });
+        }
+
+        const { username, name, password } = req.body;
+
+        // Check for existing user with the same username
+        const existingUser = await Student.findOne({ username });
+        if (existingUser) {
+            throw new AppError('Username sudah digunakan akun lain', 400);
+        }
+
+        // Hash password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        const newAdmin = new Student({
+            username,
+            name,
+            password: hashedPassword,
+            role: 'admin'
+        });
+
+        const savedAdmin = await newAdmin.save();
+
+        res.json({
+            success: true,
+            message: 'Admin berhasil dibuat',
+            admin: {
+                id: savedAdmin._id,
+                username: savedAdmin.username,
+                name: savedAdmin.name,
+                active: savedAdmin.active
+            }
+        });
+    } catch (err) {
+        const duplicateMessage = getDuplicateUserMessage(err);
+        if (duplicateMessage) {
+            return next(new AppError(duplicateMessage, 400));
+        }
+        next(err);
+    }
+});
+
 module.exports = router;
+

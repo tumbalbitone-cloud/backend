@@ -3,7 +3,7 @@ require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const connectDB = require('../db');
-const Admin = require('../models/Admin');
+const Student = require('../models/Student');
 
 async function seedAdmin() {
     const username = process.env.ADMIN_USERNAME;
@@ -21,12 +21,15 @@ async function seedAdmin() {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const admin = await Admin.findOneAndUpdate(
-        { username },
+    const admin = await Student.findOneAndUpdate(
+        { role: 'admin', username },
         {
             username,
+            studentId: `admin:${username}`,
+            name: username,
             password: hashedPassword,
-            role: 'admin'
+            role: 'admin',
+            active: true
         },
         {
             new: true,

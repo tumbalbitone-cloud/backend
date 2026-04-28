@@ -3,7 +3,6 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
 const Student = require('../models/Student');
-const Admin = require('../models/Admin');
 const { generateToken, generateRefreshToken } = require('../utils/jwt');
 const { AppError } = require('../middleware/errorHandler');
 const { authLimiter, refreshLimiter } = require('../middleware/rateLimiter');
@@ -39,54 +38,34 @@ router.post('/login', authLimiter, [
 
         const { username, password } = req.body;
 
-        // 1. Check for Admin in Database
-        const adminUser = await Admin.findOne({ username });
-        if (adminUser) {
-            const isMatch = await bcrypt.compare(password, adminUser.password);
-            if (isMatch) {
-                const payload = {
-                    id: adminUser._id.toString(),
-                    username: adminUser.username,
-                    role: 'admin'
-                };
-
-                const token = generateToken(payload);
-                const refreshToken = generateRefreshToken(payload);
-
-                return res.json({
-                    success: true,
-                    token,
-                    refreshToken,
-                    role: 'admin',
-                    username: adminUser.username
-                });
-            } else {
-                // Found admin username but wrong password
-                throw new AppError('Invalid credentials', 401);
-            }
-        }
-
-        // 2. Check for Student
-        const student = await Student.findOne({ studentId: username });
-        if (!student) {
+        const user = await Student.findOne({
+            $or: [
+                { username },
+                { studentId: username }
+            ]
+        });
+        if (!user) {
             throw new AppError('Invalid credentials', 401);
         }
 
-        const isMatch = await bcrypt.compare(password, student.password);
+        const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             throw new AppError('Invalid credentials', 401);
         }
 
-        if (!student.active) {
+        if (!user.active) {
             throw new AppError('Account is inactive', 403);
         }
 
+        const role = user.role === 'admin' ? 'admin' : 'user';
+        const loginUsername = user.username || user.studentId;
+
         // Generate JWT tokens
         const payload = {
-            id: student._id.toString(),
-            studentId: student.studentId,
-            username: student.studentId,
-            role: 'user'
+            id: user._id.toString(),
+            username: loginUsername,
+            role,
+            ...(role === 'user' && { studentId: user.studentId })
         };
 
         const token = generateToken(payload);
@@ -96,9 +75,9 @@ router.post('/login', authLimiter, [
             success: true,
             token,
             refreshToken,
-            role: 'user',
-            username: student.studentId,
-            studentId: student.studentId
+            role,
+            username: loginUsername,
+            ...(role === 'user' && { studentId: user.studentId })
         });
 
     } catch (err) {
@@ -200,18 +179,12 @@ router.put('/change-password', authMiddleware, [
 
         const { currentPassword, newPassword } = req.body;
         const userId = req.user.id;
-        const userRole = req.user.role;
 
         if (currentPassword === newPassword) {
             throw new AppError('Password baru harus berbeda dari password saat ini', 400);
         }
 
-        let user;
-        if (userRole === 'admin') {
-            user = await Admin.findById(userId);
-        } else if (userRole === 'user') {
-            user = await Student.findById(userId);
-        }
+        const user = await Student.findById(userId);
 
         if (!user) {
             throw new AppError('User not found', 404);

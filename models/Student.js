@@ -1,18 +1,32 @@
 const mongoose = require('mongoose');
 
 const StudentSchema = new mongoose.Schema({
+    username: {
+        type: String,
+        trim: true,
+        unique: true,
+        sparse: true
+    },
     studentId: {
         type: String,
-        required: true,
-        unique: true
+        trim: true,
+        unique: true,
+        sparse: true
     },
     name: {
         type: String,
+        trim: true,
         required: true
     },
     password: {
         type: String,
         required: true
+    },
+    role: {
+        type: String,
+        enum: ['user', 'admin'],
+        default: 'user',
+        index: true
     },
     active: {
         type: Boolean,
@@ -37,6 +51,19 @@ const StudentSchema = new mongoose.Schema({
     nftMintInProgress: {
         type: Boolean,
         default: false
+    }
+});
+
+StudentSchema.pre('validate', function enforceRoleIdentity() {
+    if (this.role === 'admin') {
+        if (!this.username) {
+            this.invalidate('username', 'Username is required for admin users');
+        }
+        return;
+    }
+
+    if (!this.studentId) {
+        this.invalidate('studentId', 'Student ID is required for student users');
     }
 });
 

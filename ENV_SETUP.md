@@ -131,10 +131,12 @@ VC_ISSUER_DID=did:web:university.edu
 ```env
 BLOCKCHAIN_RPC_URL=http://127.0.0.1:8545
 VOTING_SYSTEM_ADDRESS=
+CONTRACT_DEPLOY_BLOCK=0
 ```
 
 - `BLOCKCHAIN_RPC_URL` dipakai saat cek NFT, verifikasi dan mint DID, serta fallback event listener.
 - `VOTING_SYSTEM_ADDRESS` adalah alamat kontrak `VotingSystem`.
+- `CONTRACT_DEPLOY_BLOCK` opsional, dipakai read model agar pemindaian event tidak selalu mulai dari block `0`. Kode juga menerima fallback `NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK`.
 
 ### Event listener opsional
 
@@ -142,11 +144,15 @@ VOTING_SYSTEM_ADDRESS=
 BLOCKCHAIN_WS_URL=ws://127.0.0.1:8545
 EVENT_POLL_INTERVAL_MS=5000
 EVENT_POLL_BACKUP=false
+READ_MODEL_CACHE_TTL_MS=3000
+READ_MODEL_EVENT_CHUNK_SIZE=2000
 ```
 
 - `BLOCKCHAIN_WS_URL` dipakai jika ingin listener event memakai WebSocket provider.
 - `EVENT_POLL_INTERVAL_MS` mengatur interval polling fallback.
 - `EVENT_POLL_BACKUP=true` memaksa polling tetap aktif walaupun WebSocket provider tersedia.
+- `READ_MODEL_CACHE_TTL_MS` mengatur TTL cache read model blockchain.
+- `READ_MODEL_EVENT_CHUNK_SIZE` mengatur ukuran block range saat read model membaca event.
 
 ### Dokumentasi dan upload
 

@@ -12,7 +12,7 @@ Cross-Origin Request Blocked: The Same Origin Policy disallows reading the remot
 1. Cek apakah server berjalan:
    ```bash
    cd backend
-   node server.js
+   npm run dev
    ```
 
 2. Test server dengan:
@@ -23,7 +23,7 @@ Cross-Origin Request Blocked: The Same Origin Policy disallows reading the remot
 
 3. Test CORS dengan script:
    ```bash
-   node test-server.js
+   node ../scripts/test-server.js
    ```
 
 ### Solusi 2: Cek Port dan URL
@@ -43,7 +43,7 @@ Jika sudah membuat perubahan di kode:
 1. Stop server (Ctrl+C)
 2. Start ulang:
    ```bash
-   node server.js
+   npm run dev
    ```
 
 ### Solusi 4: Cek Environment Variables
@@ -52,6 +52,10 @@ Pastikan file `.env` ada dan berisi:
 ```env
 PORT=3001
 FRONTEND_URL=http://localhost:3000
+JWT_SECRET=your-super-secret-jwt-key-change-in-production-min-32-chars
+JWT_REFRESH_SECRET=your-super-secret-refresh-key-change-in-production-min-32-chars
+ADMIN_PRIVATE_KEY=your-admin-private-key
+VC_ISSUER_PRIVATE_KEY=your-vc-issuer-private-key
 ```
 
 ### Solusi 5: Clear Browser Cache
@@ -100,6 +104,17 @@ npm install
 JWT_SECRET=your-super-secret-jwt-key-change-in-production-min-32-chars
 JWT_REFRESH_SECRET=your-super-secret-refresh-key-change-in-production-min-32-chars
 ```
+
+### Error: "Missing required environment variable: ADMIN_PRIVATE_KEY"
+**Solusi:** Tambahkan private key admin kontrak ke `.env`. Untuk local Hardhat, gunakan salah satu private key akun dummy dari output `npx hardhat node`. Jangan gunakan private key Hardhat default di production.
+
+### Error: "VOTING_SYSTEM_ADDRESS is not set"
+**Solusi:** Jalankan deploy kontrak setelah Hardhat node hidup:
+```bash
+cd contracts
+npx hardhat run scripts/deploy_combined.js --network localhost
+```
+Script deploy akan mengisi `VOTING_SYSTEM_ADDRESS` di `backend/.env` dan `NEXT_PUBLIC_VOTING_SYSTEM_ADDRESS` di `frontend/.env`.
 
 ## Testing Endpoints
 

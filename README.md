@@ -16,7 +16,13 @@ Backend ini dibangun dengan Node.js + Express dan berperan sebagai lapisan API u
 - `GET /api/users/list` untuk pencarian daftar mahasiswa oleh admin.
 - `POST /api/users/create` untuk membuat akun mahasiswa baru.
 - `POST /api/users/bulk-import` untuk import mahasiswa dari file `CSV`, `XLS`, atau `XLSX`.
+- `POST /api/users/resolve-voter-addresses` untuk membantu admin mengubah daftar NIM/alamat menjadi address allowlist.
 - `POST /api/upload` untuk upload gambar kandidat oleh admin.
+- `POST /api/candidates/metadata` untuk menyimpan metadata kandidat off-chain (foto, visi, misi).
+- `GET /api/read-model/sessions` untuk membaca daftar sesi dari cache/read model blockchain.
+- `GET /api/read-model/sessions/:sessionId/results` untuk membaca hasil sesi.
+- `GET /api/read-model/sessions/:sessionId/stats` untuk statistik sesi dan partisipasi.
+- `GET /api/read-model/sessions/:sessionId/allowlist` untuk membaca allowlist sesi.
 
 ## Fitur implementasi saat ini
 
@@ -38,7 +44,7 @@ Backend ini dibangun dengan Node.js + Express dan berperan sebagai lapisan API u
 4. Isi variabel yang dibutuhkan, terutama `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ADMIN_PRIVATE_KEY`, dan `VC_ISSUER_PRIVATE_KEY`.
 5. Jalankan server dengan `npm start` atau `npm run dev`.
 
-Catatan: script `dev` saat ini menjalankan `node server.js` juga. Belum ada `nodemon` pada `package.json`, jadi restart otomatis belum dikonfigurasi di backend.
+Catatan: script `dev` saat ini memakai `node --watch server.js`, sehingga server restart otomatis saat file backend berubah.
 
 ## Environment variables
 
@@ -59,6 +65,9 @@ Variabel opsional yang juga dipakai kode:
 - `BLOCKCHAIN_WS_URL` untuk listener event via WebSocket.
 - `EVENT_POLL_INTERVAL_MS` untuk polling fallback event.
 - `EVENT_POLL_BACKUP=true` jika ingin memaksa polling walau WS aktif.
+- `CONTRACT_DEPLOY_BLOCK` atau `NEXT_PUBLIC_CONTRACT_DEPLOY_BLOCK` untuk mempercepat read model saat memindai event kontrak.
+- `READ_MODEL_CACHE_TTL_MS` untuk TTL cache read model.
+- `READ_MODEL_EVENT_CHUNK_SIZE` untuk ukuran chunk event scan.
 - `ENABLE_API_DOCS=true` untuk membuka Swagger di production.
 - `BACKEND_URL` untuk base URL upload file.
 - `UPLOAD_ALLOW_UNSIGNED=true` untuk mengizinkan akses file upload tanpa signature di production.
