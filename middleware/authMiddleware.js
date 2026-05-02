@@ -3,47 +3,49 @@ const { AppError } = require('./errorHandler');
 
 /**
  * Authentication Middleware
- * Verifies JWT token and attaches user info to request
+ * Reads token from:
+ *   1. httpOnly cookie 'token' (primary — set by login endpoint)
+ *   2. Authorization: Bearer <token> header (fallback for API tools / Postman)
  */
 const authMiddleware = (req, res, next) => {
     try {
-        const authHeader = req.headers.authorization;
+        // 1. Try cookie first (httpOnly — XSS safe)
+        let token = req.cookies?.token || null;
 
-        if (!authHeader) {
-            console.log('[AUTH] No authorization header');
-            throw new AppError('No token provided', 401);
+        // 2. Fallback: Bearer token from Authorization header
+        if (!token) {
+            const authHeader = req.headers.authorization;
+            if (authHeader) {
+                const parts = authHeader.split(' ');
+                if (parts.length === 2 && parts[0] === 'Bearer') {
+                    token = parts[1];
+                } else {
+                    return next(new AppError('Format token tidak valid. Gunakan: Bearer <token>', 401));
+                }
+            }
         }
 
-        // Extract token from "Bearer <token>"
-        const parts = authHeader.split(' ');
-        if (parts.length !== 2 || parts[0] !== 'Bearer') {
-            console.log('[AUTH] Invalid token format:', authHeader.substring(0, 20) + '...');
-            throw new AppError('Invalid token format. Use: Bearer <token>', 401);
+        if (!token) {
+            return next(new AppError('Token autentikasi tidak ditemukan', 401));
         }
 
-        const token = parts[1];
-
-        // Verify token
         try {
             const decoded = verifyToken(token);
-            console.log('[AUTH] Token verified for user:', decoded.username || decoded.studentId);
 
-            // Attach user info to request
             req.user = {
                 id: decoded.id,
                 username: decoded.username,
                 role: decoded.role,
-                ...(decoded.studentId && { studentId: decoded.studentId })
+                ...(decoded.studentId && { studentId: decoded.studentId }),
             };
 
             next();
         } catch (verifyErr) {
-            console.log('[AUTH] Token verification failed:', verifyErr.name, verifyErr.message);
             if (verifyErr.name === 'TokenExpiredError') {
-                return next(new AppError('Token expired. Please login again.', 401));
+                return next(new AppError('Token kedaluwarsa. Silakan login kembali.', 401));
             }
             if (verifyErr.name === 'JsonWebTokenError') {
-                return next(new AppError('Invalid token. Please login again.', 401));
+                return next(new AppError('Token tidak valid. Silakan login kembali.', 401));
             }
             throw verifyErr;
         }
@@ -59,18 +61,15 @@ const authMiddleware = (req, res, next) => {
 /**
  * Admin Authorization Middleware
  * Must be used after authMiddleware
- * Checks if user has admin role
  */
 const adminMiddleware = (req, res, next) => {
     try {
         if (!req.user) {
-            throw new AppError('Authentication required', 401);
+            throw new AppError('Autentikasi diperlukan', 401);
         }
-
         if (req.user.role !== 'admin') {
-            throw new AppError('Admin access required', 403);
+            throw new AppError('Akses admin diperlukan', 403);
         }
-
         next();
     } catch (err) {
         next(err);
@@ -79,19 +78,16 @@ const adminMiddleware = (req, res, next) => {
 
 /**
  * User Authorization Middleware
- * Ensures user can only access their own resources
  * Must be used after authMiddleware
  */
 const userMiddleware = (req, res, next) => {
     try {
         if (!req.user) {
-            throw new AppError('Authentication required', 401);
+            throw new AppError('Autentikasi diperlukan', 401);
         }
-
         if (req.user.role !== 'user' && req.user.role !== 'admin') {
-            throw new AppError('User access required', 403);
+            throw new AppError('Akses pengguna diperlukan', 403);
         }
-
         next();
     } catch (err) {
         next(err);
@@ -100,45 +96,54 @@ const userMiddleware = (req, res, next) => {
 
 /**
  * Optional Authentication Middleware
- * Verifies token if present, but doesn't fail if missing
- * Useful for endpoints that work for both authenticated and unauthenticated users
+ * Verifies token if present, but doesn't fail if missing.
+ * Useful for endpoints that work for both authenticated and unauthenticated users.
  */
 const optionalAuthMiddleware = (req, res, next) => {
     try {
-        const authHeader = req.headers.authorization;
+        let token = req.cookies?.token || null;
 
-        if (authHeader) {
-            const parts = authHeader.split(' ');
-            if (parts.length === 2 && parts[0] === 'Bearer') {
-                const token = parts[1];
+        if (!token) {
+            const authHeader = req.headers.authorization;
+            if (authHeader) {
+                const parts = authHeader.split(' ');
+                if (parts.length === 2 && parts[0] === 'Bearer') {
+                    token = parts[1];
+                }
+            }
+        }
+
+        if (token) {
+            try {
                 const decoded = verifyToken(token);
                 req.user = {
                     id: decoded.id,
                     username: decoded.username,
                     role: decoded.role,
-                    ...(decoded.studentId && { studentId: decoded.studentId })
+                    ...(decoded.studentId && { studentId: decoded.studentId }),
                 };
+            } catch {
+                // Invalid or expired token — continue without user
             }
         }
 
         next();
     } catch (err) {
-        // If token is invalid, just continue without user
-        // This is optional auth, so we don't fail
         next();
     }
 };
 
 /**
- * Student-only (role user). Use on DID / student-facing routes — admins must not impersonate students.
+ * Student-only middleware (role: user).
+ * Admins must not impersonate students on DID / student-facing routes.
  */
 const studentOnlyMiddleware = (req, res, next) => {
     try {
         if (!req.user) {
-            throw new AppError('Authentication required', 401);
+            throw new AppError('Autentikasi diperlukan', 401);
         }
         if (req.user.role !== 'user') {
-            throw new AppError('Student access required', 403);
+            throw new AppError('Akses khusus mahasiswa diperlukan', 403);
         }
         next();
     } catch (err) {
@@ -151,6 +156,5 @@ module.exports = {
     adminMiddleware,
     userMiddleware,
     studentOnlyMiddleware,
-    optionalAuthMiddleware
+    optionalAuthMiddleware,
 };
-

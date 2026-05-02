@@ -3,155 +3,267 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
 const Student = require('../models/Student');
+const RefreshToken = require('../models/RefreshToken');
 const { generateToken, generateRefreshToken } = require('../utils/jwt');
 const { AppError } = require('../middleware/errorHandler');
 const { authLimiter, refreshLimiter } = require('../middleware/rateLimiter');
 const { authMiddleware } = require('../middleware/authMiddleware');
 require('dotenv').config();
 
+// -------------------------------------------------------------------
+// Cookie configuration helpers
+// -------------------------------------------------------------------
+
+/** Parse JWT_REFRESH_EXPIRE env (e.g. "7d") into milliseconds */
+const parseExpireMs = (envValue, defaultDays) => {
+    const val = envValue || `${defaultDays}d`;
+    const match = val.match(/^(\d+)([smhd])$/);
+    if (!match) return defaultDays * 24 * 60 * 60 * 1000;
+    const n = parseInt(match[1], 10);
+    const unit = match[2];
+    const multipliers = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+    return n * (multipliers[unit] || 86_400_000);
+};
+
+const ACCESS_TOKEN_MS = parseExpireMs(process.env.JWT_EXPIRE, 0.25); // default 15m
+const REFRESH_TOKEN_MS = parseExpireMs(process.env.JWT_REFRESH_EXPIRE, 7); // default 7d
+
+/**
+ * Build cookie options.
+ * - httpOnly: inaccessible to JS (XSS mitigation)
+ * - secure: HTTPS only in production
+ * - sameSite: 'none' when cross-origin (different domains), else 'lax'
+ * - Set COOKIE_SAME_SITE=none in env when frontend/backend are on different domains
+ */
+const makeCookieOptions = (maxAgeMs) => {
+    const isProduction = process.env.NODE_ENV === 'production';
+    const crossOrigin = process.env.COOKIE_SAME_SITE === 'none';
+    return {
+        httpOnly: true,
+        secure: isProduction || crossOrigin,
+        sameSite: crossOrigin ? 'none' : 'lax',
+        maxAge: maxAgeMs,
+        path: '/',
+    };
+};
+
+/** Set auth cookies on the response */
+const setAuthCookies = (res, accessToken, refreshToken) => {
+    res.cookie('token', accessToken, makeCookieOptions(ACCESS_TOKEN_MS));
+    res.cookie('refreshToken', refreshToken, makeCookieOptions(REFRESH_TOKEN_MS));
+};
+
+/** Clear auth cookies */
+const clearAuthCookies = (res) => {
+    const base = { httpOnly: true, path: '/' };
+    res.clearCookie('token', base);
+    res.clearCookie('refreshToken', base);
+};
+
+// -------------------------------------------------------------------
+// POST /api/auth/login
+// -------------------------------------------------------------------
 /**
  * @route   POST /api/auth/login
- * @desc    Authenticate user and get JWT tokens
+ * @desc    Authenticate user — tokens returned as httpOnly cookies
  * @access  Public
  */
 router.post('/login', authLimiter, [
     body('username')
         .trim()
         .notEmpty()
-        .withMessage('Username is required'),
+        .withMessage('Username wajib diisi'),
     body('password')
         .notEmpty()
-        .withMessage('Password is required')
+        .withMessage('Password wajib diisi')
         .isLength({ min: 6 })
-        .withMessage('Password must be at least 6 characters')
+        .withMessage('Password minimal 6 karakter'),
 ], async (req, res, next) => {
     try {
-        // Check validation errors
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
             return res.status(400).json({
                 success: false,
-                error: 'Validation failed',
-                details: errors.array()
+                error: 'Validasi gagal',
+                details: errors.array(),
             });
         }
 
         const { username, password } = req.body;
 
         const user = await Student.findOne({
-            $or: [
-                { username },
-                { studentId: username }
-            ]
+            $or: [{ username }, { studentId: username }],
         });
         if (!user) {
-            throw new AppError('Invalid credentials', 401);
+            throw new AppError('Username atau password salah', 401);
         }
 
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
-            throw new AppError('Invalid credentials', 401);
+            throw new AppError('Username atau password salah', 401);
         }
 
         if (!user.active) {
-            throw new AppError('Account is inactive', 403);
+            throw new AppError('Akun tidak aktif', 403);
         }
 
         const role = user.role === 'admin' ? 'admin' : 'user';
         const loginUsername = user.username || user.studentId;
 
-        // Generate JWT tokens
         const payload = {
             id: user._id.toString(),
             username: loginUsername,
             role,
-            ...(role === 'user' && { studentId: user.studentId })
+            ...(role === 'user' && { studentId: user.studentId }),
         };
 
-        const token = generateToken(payload);
+        const accessToken = generateToken(payload);
         const refreshToken = generateRefreshToken(payload);
 
+        // Persist hashed refresh token in DB (rotation + revocation support)
+        await RefreshToken.createRecord(user._id, refreshToken, REFRESH_TOKEN_MS);
+
+        // Send tokens via httpOnly cookies — NOT in the response body
+        setAuthCookies(res, accessToken, refreshToken);
+
+        // Only return non-sensitive session info in the body
         return res.json({
             success: true,
-            token,
-            refreshToken,
             role,
             username: loginUsername,
-            ...(role === 'user' && { studentId: user.studentId })
+            ...(role === 'user' && { studentId: user.studentId }),
         });
-
     } catch (err) {
         next(err);
     }
 });
 
-/**
- * @route   POST /api/auth/refresh
- * @desc    Refresh access token using refresh token
- * @access  Public
- */
+// -------------------------------------------------------------------
+// GET /api/auth/me
+// -------------------------------------------------------------------
 /**
  * @route   GET /api/auth/me
- * @desc    Current user from access token (for client RBAC checks)
+ * @desc    Return current user info from access token (for RBAC checks)
  * @access  Private
  */
-router.get('/me', authMiddleware, (req, res) => {
-    res.json({
-        success: true,
-        role: req.user.role,
-        username: req.user.username,
-        ...(req.user.studentId && { studentId: req.user.studentId })
-    });
+router.get('/me', authMiddleware, async (req, res, next) => {
+    try {
+        const user = await Student.findById(req.user.id);
+        res.json({
+            success: true,
+            role: req.user.role,
+            username: req.user.username,
+            claimedBy: user ? user.claimedBy : undefined,
+            ...(req.user.studentId && { studentId: req.user.studentId }),
+        });
+    } catch (err) {
+        next(err);
+    }
 });
 
-router.post('/refresh', refreshLimiter, [
-    body('refreshToken')
-        .notEmpty()
-        .withMessage('Refresh token is required')
-], async (req, res, next) => {
+// -------------------------------------------------------------------
+// POST /api/auth/refresh
+// -------------------------------------------------------------------
+/**
+ * @route   POST /api/auth/refresh
+ * @desc    Rotate refresh token — old token is invalidated, new tokens issued
+ * @access  Public (uses httpOnly cookie, no body needed)
+ */
+router.post('/refresh', refreshLimiter, async (req, res, next) => {
     try {
-        const errors = validationResult(req);
-        if (!errors.isEmpty()) {
-            return res.status(400).json({
+        // Read refresh token from cookie (httpOnly) or fallback to body for API tools
+        const rawRefreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
+
+        if (!rawRefreshToken) {
+            return res.status(401).json({
                 success: false,
-                error: 'Validation failed',
-                details: errors.array()
+                error: 'Refresh token tidak ditemukan. Silakan login kembali.',
             });
         }
 
-        const { refreshToken } = req.body;
-        const { verifyRefreshToken, generateToken } = require('../utils/jwt');
+        const { verifyRefreshToken } = require('../utils/jwt');
 
-        // Verify refresh token
-        const decoded = verifyRefreshToken(refreshToken);
+        // 1. Verify JWT signature and expiry
+        let decoded;
+        try {
+            decoded = verifyRefreshToken(rawRefreshToken);
+        } catch (err) {
+            clearAuthCookies(res);
+            return res.status(401).json({
+                success: false,
+                error: 'Refresh token tidak valid atau sudah kedaluwarsa. Silakan login kembali.',
+            });
+        }
 
-        // Generate new access token
+        // 2. Verify token exists in DB (not already used/revoked)
+        const record = await RefreshToken.findByRawToken(rawRefreshToken);
+        if (!record) {
+            // Possible token reuse attack — clear all tokens for this user
+            await RefreshToken.deleteAllForUser(decoded.id);
+            clearAuthCookies(res);
+            return res.status(401).json({
+                success: false,
+                error: 'Token tidak valid (sudah digunakan atau dicabut). Silakan login kembali.',
+            });
+        }
+
+        // 3. Delete the old refresh token (rotation — one-time use)
+        await RefreshToken.deleteByRawToken(rawRefreshToken);
+
+        // 4. Issue new token pair
         const newPayload = {
             id: decoded.id,
             username: decoded.username,
             role: decoded.role,
-            ...(decoded.studentId && { studentId: decoded.studentId })
+            ...(decoded.studentId && { studentId: decoded.studentId }),
         };
 
-        const newToken = generateToken(newPayload);
+        const newAccessToken = generateToken(newPayload);
+        const newRefreshToken = generateRefreshToken(newPayload);
 
-        return res.json({
-            success: true,
-            token: newToken
-        });
+        // 5. Persist new refresh token in DB
+        await RefreshToken.createRecord(decoded.id, newRefreshToken, REFRESH_TOKEN_MS);
 
+        // 6. Set new cookies
+        setAuthCookies(res, newAccessToken, newRefreshToken);
+
+        return res.json({ success: true });
     } catch (err) {
-        if (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError') {
-            // Expected when refresh token expired or secrets rotated — respond without error middleware stack spam
-            return res.status(401).json({
-                success: false,
-                error: 'Invalid or expired refresh token'
-            });
-        }
         next(err);
     }
 });
 
+// -------------------------------------------------------------------
+// POST /api/auth/logout
+// -------------------------------------------------------------------
+/**
+ * @route   POST /api/auth/logout
+ * @desc    Invalidate refresh token in DB and clear auth cookies
+ * @access  Public (works even with expired access token)
+ */
+router.post('/logout', async (req, res, next) => {
+    try {
+        const rawRefreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
+
+        if (rawRefreshToken) {
+            // Delete from DB — ignore errors (token may already be expired/removed)
+            await RefreshToken.deleteByRawToken(rawRefreshToken).catch(() => {});
+        }
+
+        clearAuthCookies(res);
+
+        return res.json({
+            success: true,
+            message: 'Berhasil keluar dari akun.',
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// -------------------------------------------------------------------
+// PUT /api/auth/change-password
+// -------------------------------------------------------------------
 /**
  * @route   PUT /api/auth/change-password
  * @desc    Change user's password
@@ -160,20 +272,20 @@ router.post('/refresh', refreshLimiter, [
 router.put('/change-password', authMiddleware, [
     body('currentPassword')
         .notEmpty()
-        .withMessage('Current password is required'),
+        .withMessage('Password saat ini wajib diisi'),
     body('newPassword')
         .notEmpty()
-        .withMessage('New password is required')
+        .withMessage('Password baru wajib diisi')
         .isLength({ min: 6 })
-        .withMessage('New password must be at least 6 characters')
+        .withMessage('Password baru minimal 6 karakter'),
 ], async (req, res, next) => {
     try {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
             return res.status(400).json({
                 success: false,
-                error: 'Validation failed',
-                details: errors.array()
+                error: 'Validasi gagal',
+                details: errors.array(),
             });
         }
 
@@ -185,30 +297,27 @@ router.put('/change-password', authMiddleware, [
         }
 
         const user = await Student.findById(userId);
-
         if (!user) {
-            throw new AppError('User not found', 404);
+            throw new AppError('Pengguna tidak ditemukan', 404);
         }
 
-        // Verify current password
         const isMatch = await bcrypt.compare(currentPassword, user.password);
         if (!isMatch) {
             throw new AppError('Password saat ini salah', 401);
         }
 
-        // Hash new password
         const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(newPassword, salt);
-
-        // Update password
-        user.password = hashedPassword;
+        user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
+
+        // Invalidate all active refresh tokens — force re-login on other devices
+        await RefreshToken.deleteAllForUser(userId);
+        clearAuthCookies(res);
 
         res.json({
             success: true,
-            message: 'Password berhasil diperbarui'
+            message: 'Password berhasil diperbarui. Silakan login kembali.',
         });
-
     } catch (err) {
         next(err);
     }

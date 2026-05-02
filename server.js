@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
+const cookieParser = require('cookie-parser');
 require('dotenv').config();
 
 const path = require('path');
@@ -27,9 +28,34 @@ try {
 
 const { corsWhitelist, expressCorsOptions, socketIoCors } = createCorsPolicy(PORT);
 
-connectDB();
+connectDB().then(() => {
+    // Reset any nftMintInProgress flags left over from a previous crash
+    resetStaleMintLocks();
+});
+
+/**
+ * On startup, clear any nftMintInProgress flags that were stuck due to
+ * a server crash mid-mint. Without this, affected users can never mint again.
+ */
+async function resetStaleMintLocks() {
+    try {
+        const Student = require('./models/Student');
+        const result = await Student.updateMany(
+            { nftMintInProgress: true },
+            { $set: { nftMintInProgress: false } }
+        );
+        if (result.modifiedCount > 0) {
+            console.log(`[Startup] ✅ Reset ${result.modifiedCount} stuck mint lock(s) (nftMintInProgress)`);
+        }
+    } catch (err) {
+        console.error('[Startup] ❌ Failed to reset stuck mint locks:', err.message);
+    }
+}
 
 app.use(cors(expressCorsOptions));
+
+// Parse cookies (needed for httpOnly auth cookies)
+app.use(cookieParser());
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
