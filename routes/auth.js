@@ -31,17 +31,19 @@ const REFRESH_TOKEN_MS = parseExpireMs(process.env.JWT_REFRESH_EXPIRE, 7); // de
 /**
  * Build cookie options.
  * - httpOnly: inaccessible to JS (XSS mitigation)
- * - secure: HTTPS only in production
- * - sameSite: 'none' when cross-origin (different domains), else 'lax'
- * - Set COOKIE_SAME_SITE=none in env when frontend/backend are on different domains
+ * - secure: HTTPS only (required when sameSite is 'none')
+ * - sameSite: 'none' in production for cross-origin decoupled apps, 'lax' for local dev
  */
 const makeCookieOptions = (maxAgeMs) => {
     const isProduction = process.env.NODE_ENV === 'production';
-    const crossOrigin = process.env.COOKIE_SAME_SITE === 'none';
+    // If explicitly set in env, use it. Otherwise default to 'none' in prod (for Vercel/Railway setups) and 'lax' in dev.
+    const sameSiteSetting = process.env.COOKIE_SAME_SITE || (isProduction ? 'none' : 'lax');
+    const secure = isProduction || sameSiteSetting === 'none';
+
     return {
         httpOnly: true,
-        secure: isProduction || crossOrigin,
-        sameSite: crossOrigin ? 'none' : 'lax',
+        secure: secure,
+        sameSite: sameSiteSetting,
         maxAge: maxAgeMs,
         path: '/',
     };
