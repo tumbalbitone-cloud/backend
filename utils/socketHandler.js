@@ -11,7 +11,19 @@ let pollingIntervalId = null;
  * Optional JWT on handshake — used for join_admin; anonymous allowed for join_session.
  */
 const socketAuthMiddleware = (socket, next) => {
-    const raw = socket.handshake.auth?.token;
+    let raw = socket.handshake.auth?.token;
+
+    if (!raw && socket.request.headers.cookie) {
+        const cookies = socket.request.headers.cookie.split(';');
+        for (const cookie of cookies) {
+            const [key, value] = cookie.trim().split('=');
+            if (key === 'token') {
+                raw = value;
+                break;
+            }
+        }
+    }
+
     if (!raw || typeof raw !== "string") {
         socket.user = null;
         return next();
