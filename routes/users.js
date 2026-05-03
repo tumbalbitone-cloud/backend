@@ -5,11 +5,11 @@ const multer = require('multer');
 const XLSX = require('xlsx');
 const { ethers } = require('ethers');
 const { body, query, validationResult } = require('express-validator');
-const VotingSystemArtifact = require('../contracts/VotingSystem.json');
 const Student = require('../models/Student');
 const { authMiddleware, adminMiddleware } = require('../middleware/authMiddleware');
 const { adminLimiter } = require('../middleware/rateLimiter');
 const { AppError } = require('../middleware/errorHandler');
+const { getWriteContract } = require('../utils/blockchainClient');
 
 const escapeRegex = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const BULK_IMPORT_DEFAULT_PASSWORD = 'password123';
@@ -36,6 +36,24 @@ const getDuplicateUserMessage = (error) => {
         return 'Wallet sudah tertaut ke akun lain';
     }
     return 'User already exists';
+};
+
+const ensureAdminRole = async (address) => {
+    try {
+        const contract = getWriteContract();
+        const ADMIN_ROLE = await contract.ADMIN_ROLE();
+        const hasRole = await contract.hasRole(ADMIN_ROLE, address);
+        if (hasRole) {
+            return false;
+        }
+
+        const tx = await contract.grantRole(ADMIN_ROLE, address);
+        await tx.wait();
+        return true;
+    } catch (error) {
+        console.error('Failed to grant ADMIN_ROLE on blockchain:', error);
+        throw new AppError('Gagal mendaftarkan wallet ke blockchain. Pastikan server blockchain berjalan dan ADMIN_PRIVATE_KEY memiliki hak DEFAULT_ADMIN_ROLE.', 500);
+    }
 };
 
 const getCellValue = (row = {}, aliases = []) => {
@@ -594,20 +612,7 @@ router.post('/create-admin', adminLimiter, authMiddleware, adminMiddleware, [
                 throw new AppError('Wallet address sudah digunakan oleh akun lain', 400);
             }
 
-            // Blockchain Integration to grant ADMIN_ROLE
-            const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL);
-            const wallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);
-            const contract = new ethers.Contract(process.env.VOTING_SYSTEM_ADDRESS, VotingSystemArtifact.abi, wallet);
-
-            try {
-                const ADMIN_ROLE = await contract.ADMIN_ROLE();
-                const tx = await contract.grantRole(ADMIN_ROLE, normalizedWallet);
-                await tx.wait();
-                roleGranted = true;
-            } catch (error) {
-                console.error("Failed to grant ADMIN_ROLE on blockchain:", error);
-                throw new AppError("Gagal mendaftarkan wallet ke blockchain. Pastikan server blockchain berjalan.", 500);
-            }
+            roleGranted = await ensureAdminRole(normalizedWallet);
         }
 
         // Hash password
@@ -676,28 +681,19 @@ router.post('/bind-admin-wallet', adminLimiter, authMiddleware, adminMiddleware,
             throw new AppError('Admin tidak ditemukan', 404);
         }
 
-        if (adminUser.claimedBy) {
+        if (adminUser.claimedBy && adminUser.claimedBy.toLowerCase() !== normalizedWallet.toLowerCase()) {
             throw new AppError('Anda sudah menautkan wallet address.', 400);
         }
 
-        const existingWalletUser = await Student.findOne({ claimedByNormalized: normalizedWallet.toLowerCase() });
+        const existingWalletUser = await Student.findOne({
+            _id: { $ne: adminUser._id },
+            claimedByNormalized: normalizedWallet.toLowerCase()
+        });
         if (existingWalletUser) {
             throw new AppError('Wallet address sudah digunakan oleh akun lain', 400);
         }
 
-        // Blockchain Integration to grant ADMIN_ROLE
-        const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL);
-        const wallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);
-        const contract = new ethers.Contract(process.env.VOTING_SYSTEM_ADDRESS, VotingSystemArtifact.abi, wallet);
-
-        try {
-            const ADMIN_ROLE = await contract.ADMIN_ROLE();
-            const tx = await contract.grantRole(ADMIN_ROLE, normalizedWallet);
-            await tx.wait();
-        } catch (error) {
-            console.error("Failed to grant ADMIN_ROLE on blockchain:", error);
-            throw new AppError("Gagal mendaftarkan wallet ke blockchain. Pastikan server blockchain berjalan.", 500);
-        }
+        const roleGranted = await ensureAdminRole(normalizedWallet);
 
         adminUser.claimedBy = normalizedWallet;
         adminUser.claimedByNormalized = normalizedWallet.toLowerCase();
@@ -706,7 +702,8 @@ router.post('/bind-admin-wallet', adminLimiter, authMiddleware, adminMiddleware,
         res.json({
             success: true,
             message: 'Wallet berhasil ditautkan dan ADMIN_ROLE diberikan',
-            walletAddress: normalizedWallet
+            walletAddress: normalizedWallet,
+            roleGranted
         });
     } catch (err) {
         next(err);
@@ -714,4 +711,3 @@ router.post('/bind-admin-wallet', adminLimiter, authMiddleware, adminMiddleware,
 });
 
 module.exports = router;
-

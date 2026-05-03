@@ -61,6 +61,30 @@ const walletAddressValidator = () =>
             return true;
         });
 
+const getAdminRoleState = async (address) => {
+    const contract = getReadContract();
+    const ADMIN_ROLE = await contract.ADMIN_ROLE();
+    return contract.hasRole(ADMIN_ROLE, address);
+};
+
+const ensureAdminRole = async (address) => {
+    try {
+        const contract = getWriteContract();
+        const ADMIN_ROLE = await contract.ADMIN_ROLE();
+        const hasRole = await contract.hasRole(ADMIN_ROLE, address);
+        if (hasRole) {
+            return false;
+        }
+
+        const tx = await contract.grantRole(ADMIN_ROLE, address);
+        await tx.wait();
+        return true;
+    } catch (error) {
+        console.error('Failed to grant ADMIN_ROLE on blockchain:', error);
+        throw new AppError('Gagal memberikan ADMIN_ROLE ke wallet admin. Pastikan node blockchain berjalan dan ADMIN_PRIVATE_KEY memiliki hak DEFAULT_ADMIN_ROLE.', 500);
+    }
+};
+
 /**
  * @route   POST /api/did/admin-wallet/challenge
  * @desc    Create a wallet binding challenge for the authenticated admin
@@ -155,7 +179,8 @@ router.get('/admin-wallet/status/:address', authMiddleware, adminMiddleware, [
             success: true,
             bound: true,
             matches: true,
-            address: admin.claimedBy
+            address: admin.claimedBy,
+            adminRoleGranted: await getAdminRoleState(normalizedAddress)
         });
     } catch (err) {
         next(err);
@@ -230,10 +255,16 @@ router.post('/admin-wallet/bind', didLimiter, authMiddleware, adminMiddleware, [
             throw new AppError('Failed to bind admin wallet', 400);
         }
 
+        const roleGranted = await ensureAdminRole(userAddress);
+
         res.json({
             success: true,
             address: admin.claimedBy,
-            message: 'Admin wallet bound successfully'
+            adminRoleGranted: true,
+            roleGranted,
+            message: roleGranted
+                ? 'Admin wallet bound and ADMIN_ROLE granted successfully'
+                : 'Admin wallet bound successfully'
         });
     } catch (err) {
         if (err?.name === 'TokenExpiredError' || err?.name === 'JsonWebTokenError') {

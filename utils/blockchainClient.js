@@ -3,6 +3,9 @@ const VotingSystemArtifact = require('../contracts/VotingSystem.json');
 
 const DEFAULT_RPC_URL = 'http://127.0.0.1:8545';
 const EXTRA_ABI = [
+    'function ADMIN_ROLE() view returns (bytes32)',
+    'function grantRole(bytes32 role, address account)',
+    'function hasRole(bytes32 role, address account) view returns (bool)',
     'function getSessionAllowedVoters(uint256 _sessionId) view returns (address[] memory)',
     'function isEligibleForSession(uint256 _sessionId, address _voter) view returns (bool)',
     'function setSessionAllowedVoters(uint256 _sessionId, address[] memory _voters)',
